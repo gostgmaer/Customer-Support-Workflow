@@ -6,6 +6,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { SystemSetting } from "@/types/api";
 
 import { useResetSetting, useUpdateSetting } from "../hooks";
@@ -52,26 +53,28 @@ export function SettingRow({ setting }: { setting: SystemSetting }) {
         {editing ? (
           <div className="mt-2 flex items-center gap-2">
             {meta.type === "boolean" ? (
-              <select
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                className="h-9 rounded-md border border-input bg-card px-2 text-sm"
-              >
-                <option value="true">true</option>
-                <option value="false">false</option>
-              </select>
+              <Select value={draft} onValueChange={setDraft}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="true">true</SelectItem>
+                  <SelectItem value="false">false</SelectItem>
+                </SelectContent>
+              </Select>
             ) : meta.type === "enum" ? (
-              <select
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                className="h-9 rounded-md border border-input bg-card px-2 text-sm"
-              >
-                {meta.options?.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
+              <Select value={draft} onValueChange={setDraft}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {meta.options?.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {option}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             ) : (
               <Input
                 type="number"

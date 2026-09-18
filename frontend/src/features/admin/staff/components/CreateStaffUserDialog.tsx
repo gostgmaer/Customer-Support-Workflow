@@ -1,13 +1,14 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm } from "react-hook-form";
+import { Controller, useForm } from "react-hook-form";
 
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { FieldError, Label } from "@/components/ui/Label";
 import { Input } from "@/components/ui/Input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { getErrorMessage } from "@/lib/api/get-error-message";
 import type { StaffRole } from "@/types/api";
 
@@ -21,6 +22,7 @@ export function CreateStaffUserDialog({ open, onClose }: { open: boolean; onClos
     register,
     handleSubmit,
     reset,
+    control,
     formState: { errors },
   } = useForm<CreateStaffUserInput>({
     resolver: zodResolver(createStaffUserSchema),
@@ -60,17 +62,24 @@ export function CreateStaffUserDialog({ open, onClose }: { open: boolean; onClos
 
         <div>
           <Label htmlFor="role">Role</Label>
-          <select
-            id="role"
-            {...register("role")}
-            className="h-10 w-full rounded-md border border-input bg-card px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {ROLES.map((role) => (
-              <option key={role} value={role}>
-                {role}
-              </option>
-            ))}
-          </select>
+          <Controller
+            control={control}
+            name="role"
+            render={({ field }) => (
+              <Select value={field.value} onValueChange={field.onChange}>
+                <SelectTrigger id="role" className="h-10 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ROLES.map((role) => (
+                    <SelectItem key={role} value={role}>
+                      {role}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+          />
         </div>
 
         <div className="flex justify-end gap-2 pt-2">

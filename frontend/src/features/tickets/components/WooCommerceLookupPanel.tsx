@@ -31,7 +31,7 @@ export function WooCommerceLookupPanel() {
           placeholder="Order number"
           aria-label="WooCommerce order number"
         />
-        <Button type="submit" variant="outline" isLoading={lookup.isPending}>
+        <Button type="submit" variant="outline" isLoading={lookup.isPending} className="shrink-0 whitespace-nowrap">
           Look up
         </Button>
       </form>

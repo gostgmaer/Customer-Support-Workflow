@@ -1,45 +1,64 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+/* shadcn/ui's shared animation keyframes + data-state custom variants
+   (data-open/data-closed/data-checked/etc.) - real supporting
+   infrastructure its generated components (Select, DropdownMenu, ...)
+   rely on for open/close transitions, not decorative bloat. */
+@import "shadcn/tailwind.css";
 
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
+  /* Neutral base adopted from shadcn/ui's official default theme (free,
+     MIT - see ui.shadcn.com/docs/theming) - true achromatic grays rather
+     than the blue-tinted slate scale this used before. --radius already
+     matched shadcn's own default (0.625rem) exactly. Primary/accent stay
+     the app's own indigo brand color - shadcn's own neutral preset ships
+     a plain near-black primary, meant to be overridden per-project. */
+  --background: #ffffff;
+  --foreground: #0a0a0a;
   --card: #ffffff;
-  --card-foreground: #0f172a;
-  --border: #e2e8f0;
-  --input: #e2e8f0;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
   --ring: #6366f1;
 
   --primary: #4f46e5;
   --primary-foreground: #ffffff;
   --primary-hover: #4338ca;
 
-  --secondary: #f1f5f9;
-  --secondary-foreground: #0f172a;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #0a0a0a;
 
-  --muted: #f1f5f9;
-  --muted-foreground: #64748b;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
 
   --accent: #eef2ff;
   --accent-foreground: #4338ca;
 
-  --success: #16a34a;
+  --success: #15803d;
   --success-foreground: #ffffff;
-  --success-bg: #f0fdf4;
+  --success-bg: #dcfce7;
 
-  --warning: #d97706;
+  --warning: #b45309;
   --warning-foreground: #ffffff;
-  --warning-bg: #fffbeb;
+  --warning-bg: #fef3c7;
 
   --danger: #dc2626;
   --danger-foreground: #ffffff;
-  --danger-bg: #fef2f2;
+  --danger-bg: #fee2e2;
+  /* shadcn/ui's generated components (Select, DropdownMenu, ...)
+     reference --destructive by that name, not this app's own --danger -
+     same color, kept as two names for the two audiences. */
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
 
   --radius: 0.625rem;
 
   /* App chrome (sidebar/topbar) - deliberately a fixed dark surface in
      both themes, like the "chrome" in Linear/VSCode/GitHub's dashboard -
      it's what makes the shell read as a tool, not a content page. */
-  --chrome-bg: #0b1120;
+  --chrome-bg: #0a0a0a;
   --chrome-foreground: #e2e8f0;
   --chrome-muted: #8b96ab;
   --chrome-border: rgba(255, 255, 255, 0.08);
@@ -53,23 +72,25 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0b0f19;
-    --foreground: #e2e8f0;
-    --card: #131a2a;
-    --card-foreground: #e2e8f0;
-    --border: #263047;
-    --input: #263047;
+    --background: #0a0a0a;
+    --foreground: #fafafa;
+    --card: #171717;
+    --card-foreground: #fafafa;
+    --popover: #171717;
+    --popover-foreground: #fafafa;
+    --border: #262626;
+    --input: #262626;
     --ring: #818cf8;
 
     --primary: #6366f1;
     --primary-foreground: #ffffff;
     --primary-hover: #818cf8;
 
-    --secondary: #1a2338;
-    --secondary-foreground: #e2e8f0;
+    --secondary: #262626;
+    --secondary-foreground: #fafafa;
 
-    --muted: #1a2338;
-    --muted-foreground: #94a3b8;
+    --muted: #262626;
+    --muted-foreground: #a3a3a3;
 
     --accent: #1e2947;
     --accent-foreground: #a5b4fc;
@@ -85,6 +106,8 @@
     --danger: #f87171;
     --danger-foreground: #450a0a;
     --danger-bg: #2c1212;
+    --destructive: #f87171;
+    --destructive-foreground: #450a0a;
   }
 }
 
@@ -93,6 +116,8 @@
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -121,6 +146,8 @@
   --color-danger: var(--danger);
   --color-danger-foreground: var(--danger-foreground);
   --color-danger-bg: var(--danger-bg);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
 
   --color-chrome: var(--chrome-bg);
   --color-chrome-foreground: var(--chrome-foreground);
@@ -129,8 +156,10 @@
   --color-chrome-active: var(--chrome-active-bg);
   --color-chrome-hover: var(--chrome-hover-bg);
 
+  --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: var(--radius);
   --radius-lg: calc(var(--radius) + 0.25rem);
+  --radius-xl: calc(var(--radius) * 1.4);
 
   --shadow-sm: var(--shadow-sm);
   --shadow-md: var(--shadow-md);

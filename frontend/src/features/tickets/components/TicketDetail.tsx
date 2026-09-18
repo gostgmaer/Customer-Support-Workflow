@@ -1,7 +1,16 @@
 "use client";
 
 import { format } from "date-fns";
-import { Bug, CheckCircle2, ExternalLink, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  Bug,
+  CheckCircle2,
+  ExternalLink,
+  ListChecks,
+  MessageSquareText,
+  Sparkles,
+  XCircle,
+} from "lucide-react";
 import { useState } from "react";
 
 import { PriorityBadge, StatusBadge } from "@/components/ui/Badge";
@@ -52,12 +61,16 @@ export function TicketDetail({ ticket }: { ticket: SupportTicket }) {
   const createJiraIssue = useCreateJiraIssue(ticket.id);
 
   const canAct = ticket.status === "open" && !!ticket.workflow_run_id;
+  const hasActivity =
+    ticket.actions_taken.length > 0 || ticket.tools_used.length > 0 || ticket.relevant_documents.length > 0;
 
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-start justify-between gap-4">
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <CardTitle>{ticket.summary || "Support ticket"}</CardTitle>
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">
+            {ticket.summary || "Support ticket"}
+          </h1>
           <p className="mt-1 text-xs text-muted-foreground">
             Opened {format(new Date(ticket.created_at), "MMM d, yyyy 'at' h:mm a")}
           </p>
@@ -66,90 +79,21 @@ export function TicketDetail({ ticket }: { ticket: SupportTicket }) {
           <PriorityBadge priority={ticket.priority} />
           <StatusBadge status={ticket.status} />
         </div>
-      </CardHeader>
+      </div>
 
-      <CardContent>
-        <dl className="grid gap-4 sm:grid-cols-2">
-          <DetailField label="Intent" value={ticket.intent.replace(/_/g, " ")} />
-          <DetailField label="Approved / rejected by" value={ticket.approved_by ?? ""} />
-          <DetailField label="Customer problem" value={ticket.customer_problem} />
-          <DetailField label="Reason for escalation" value={ticket.reason_for_escalation} />
-          <DetailField label="Recommended next action" value={ticket.recommended_next_action} />
-        </dl>
-
-        <div className="mt-4 grid gap-4 sm:grid-cols-3">
-          <TagList label="Actions taken" items={ticket.actions_taken} />
-          <TagList label="Tools used" items={ticket.tools_used} />
-          <TagList label="Relevant documents" items={ticket.relevant_documents} />
-        </div>
-
-        <div className="mt-4 flex items-center justify-between gap-4 rounded-md border border-border p-4">
-          <div className="flex items-center gap-2 text-sm">
-            <Bug className="size-4 text-muted-foreground" aria-hidden="true" />
-            {ticket.external_ref ? (
-              <a
-                href={ticket.external_url ?? "#"}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
-              >
-                {ticket.external_ref}
-                <ExternalLink className="size-3" aria-hidden="true" />
-              </a>
-            ) : (
-              <span className="text-muted-foreground">Not linked to a JIRA issue</span>
-            )}
+      {canAct && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning-bg px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-warning">
+            <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
+            Awaiting your decision before this can proceed.
           </div>
-          {!ticket.external_ref && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => createJiraIssue.mutate()}
-              isLoading={createJiraIssue.isPending}
-            >
-              Create in JIRA
-            </Button>
-          )}
-        </div>
-
-        <div className="mt-4">
-          <WooCommerceLookupPanel />
-        </div>
-
-        {ticket.pending_call && (
-          <div className="mt-4">
-            <PendingCallPanel
-              pendingCall={ticket.pending_call}
-              values={Object.fromEntries(
-                Object.entries(ticket.pending_call.arguments).map(([key, value]) => [
-                  key,
-                  argEdits[key] ?? String(value ?? ""),
-                ])
-              )}
-              onChange={(key, value) => setArgEdits((prev) => ({ ...prev, [key]: value }))}
-              disabled={!canAct}
-            />
-          </div>
-        )}
-
-        {ticket.execution_result && (
-          <div className="mt-4 rounded-md border border-border p-4">
-            <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Execution result
-            </dt>
-            <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words text-xs text-foreground">
-              {JSON.stringify(ticket.execution_result, null, 2)}
-            </pre>
-          </div>
-        )}
-
-        {canAct && (
-          <div className="mt-6 flex justify-end gap-2 border-t border-border pt-4">
-            <Button variant="outline" onClick={() => setRejectOpen(true)} isLoading={reject.isPending}>
+          <div className="flex shrink-0 gap-2">
+            <Button variant="outline" size="sm" onClick={() => setRejectOpen(true)} isLoading={reject.isPending}>
               <XCircle className="size-4" aria-hidden="true" />
               Reject
             </Button>
             <Button
+              size="sm"
               onClick={() =>
                 approve.mutate({
                   workflowRunId: ticket.workflow_run_id as string,
@@ -162,8 +106,130 @@ export function TicketDetail({ ticket }: { ticket: SupportTicket }) {
               Approve
             </Button>
           </div>
-        )}
-      </CardContent>
+        </div>
+      )}
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="space-y-4 lg:col-span-2">
+          {ticket.customer_problem && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <MessageSquareText className="size-4 text-muted-foreground" aria-hidden="true" />
+                  Customer problem
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="whitespace-pre-wrap text-sm text-foreground">{ticket.customer_problem}</p>
+              </CardContent>
+            </Card>
+          )}
+
+          {(ticket.reason_for_escalation || ticket.recommended_next_action) && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <Sparkles className="size-4 text-muted-foreground" aria-hidden="true" />
+                  AI assessment
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <DetailField label="Reason for escalation" value={ticket.reason_for_escalation} />
+                <DetailField label="Recommended next action" value={ticket.recommended_next_action} />
+              </CardContent>
+            </Card>
+          )}
+
+          {hasActivity && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <ListChecks className="size-4 text-muted-foreground" aria-hidden="true" />
+                  Activity
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-4 sm:grid-cols-3">
+                <TagList label="Actions taken" items={ticket.actions_taken} />
+                <TagList label="Tools used" items={ticket.tools_used} />
+                <TagList label="Relevant documents" items={ticket.relevant_documents} />
+              </CardContent>
+            </Card>
+          )}
+
+          {ticket.pending_call && (
+            <PendingCallPanel
+              pendingCall={ticket.pending_call}
+              values={Object.fromEntries(
+                Object.entries(ticket.pending_call.arguments).map(([key, value]) => [
+                  key,
+                  argEdits[key] ?? String(value ?? ""),
+                ])
+              )}
+              onChange={(key, value) => setArgEdits((prev) => ({ ...prev, [key]: value }))}
+              disabled={!canAct}
+            />
+          )}
+
+          {ticket.execution_result && (
+            <div className="rounded-md border border-border p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Execution result
+              </p>
+              <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap wrap-break-word text-xs text-foreground">
+                {JSON.stringify(ticket.execution_result, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Details</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <DetailField label="Intent" value={ticket.intent.replace(/_/g, " ")} />
+              <DetailField label="Approved / rejected by" value={ticket.approved_by ?? ""} />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Bug className="size-4 text-muted-foreground" aria-hidden="true" />
+                JIRA
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {ticket.external_ref ? (
+                <a
+                  href={ticket.external_url ?? "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+                >
+                  {ticket.external_ref}
+                  <ExternalLink className="size-3" aria-hidden="true" />
+                </a>
+              ) : (
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-muted-foreground">Not linked</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => createJiraIssue.mutate()}
+                    isLoading={createJiraIssue.isPending}
+                  >
+                    Create
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <WooCommerceLookupPanel />
+        </div>
+      </div>
 
       <RejectTicketDialog
         open={rejectOpen}
@@ -176,6 +242,6 @@ export function TicketDetail({ ticket }: { ticket: SupportTicket }) {
           );
         }}
       />
-    </Card>
+    </div>
   );
 }

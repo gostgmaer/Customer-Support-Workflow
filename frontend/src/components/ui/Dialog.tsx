@@ -1,8 +1,9 @@
 "use client";
 
 import { X } from "lucide-react";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
+import { DialogPortalProvider } from "@/components/ui/dialog-portal-context";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -27,6 +28,12 @@ export function Dialog({
   className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const [dialogNode, setDialogNode] = useState<HTMLDialogElement | null>(null);
+
+  const setRefs = useCallback((node: HTMLDialogElement | null) => {
+    ref.current = node;
+    setDialogNode(node);
+  }, []);
 
   useEffect(() => {
     const node = ref.current;
@@ -37,7 +44,7 @@ export function Dialog({
 
   return (
     <dialog
-      ref={ref}
+      ref={setRefs}
       onClose={onClose}
       onCancel={onClose}
       onClick={(event) => {
@@ -65,7 +72,9 @@ export function Dialog({
           <X className="size-4" aria-hidden="true" />
         </button>
       </div>
-      <div className="px-5 py-4">{children}</div>
+      <div className="px-5 py-4">
+        <DialogPortalProvider value={dialogNode}>{children}</DialogPortalProvider>
+      </div>
     </dialog>
   );
 }

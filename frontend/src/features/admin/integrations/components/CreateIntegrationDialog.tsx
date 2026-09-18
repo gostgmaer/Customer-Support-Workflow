@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { getErrorMessage } from "@/lib/api/get-error-message";
 import type { IntegrationAuthType, IntegrationType } from "@/types/api";
 
@@ -94,24 +95,27 @@ export function CreateIntegrationDialog({ open, onClose }: { open: boolean; onCl
 
         <div>
           <Label htmlFor="integration-type">Type</Label>
-          <select
-            id="integration-type"
+          <Select
             value={type}
-            onChange={(e) => {
-              const nextType = e.target.value as IntegrationType;
+            onValueChange={(next) => {
+              const nextType = next as IntegrationType;
               const nextAllowed = INTEGRATION_TYPE_META[nextType].allowedAuthTypes ?? ALL_AUTH_TYPES;
               setType(nextType);
               setValues({});
               if (!nextAllowed.includes(customAuthType)) setCustomAuthType(nextAllowed[0]);
             }}
-            className="h-10 w-full rounded-md border border-input bg-card px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            {TYPES.map((t) => (
-              <option key={t} value={t}>
-                {INTEGRATION_TYPE_META[t].label}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger id="integration-type" className="h-10 w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TYPES.map((t) => (
+                <SelectItem key={t} value={t}>
+                  {INTEGRATION_TYPE_META[t].label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <p className="mt-1.5 text-xs text-muted-foreground">{meta.description}</p>
         </div>
 
@@ -129,21 +133,24 @@ export function CreateIntegrationDialog({ open, onClose }: { open: boolean; onCl
         {meta.fixedAuthType === null && (
           <div>
             <Label htmlFor="integration-auth-type">Auth type</Label>
-            <select
-              id="integration-auth-type"
+            <Select
               value={customAuthType}
-              onChange={(e) => {
-                setCustomAuthType(e.target.value as IntegrationAuthType);
+              onValueChange={(next) => {
+                setCustomAuthType(next as IntegrationAuthType);
                 setValues({});
               }}
-              className="h-10 w-full rounded-md border border-input bg-card px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              {allowedAuthTypes.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger id="integration-auth-type" className="h-10 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {allowedAuthTypes.map((a) => (
+                  <SelectItem key={a} value={a}>
+                    {a}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         )}
 
