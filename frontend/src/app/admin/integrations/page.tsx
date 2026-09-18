@@ -5,14 +5,13 @@ import { useState } from "react";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
-import { Alert } from "@/components/ui/Alert";
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { CreateIntegrationDialog } from "@/features/admin/integrations/components/CreateIntegrationDialog";
 import { IntegrationCard } from "@/features/admin/integrations/components/IntegrationCard";
 import { useIntegrations } from "@/features/admin/integrations/hooks";
-import { getErrorMessage } from "@/lib/api/get-error-message";
 
 function IntegrationsContent() {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -33,7 +32,7 @@ function IntegrationsContent() {
         </Button>
       </div>
 
-      {integrations.isError && <Alert variant="error">{getErrorMessage(integrations.error)}</Alert>}
+      {integrations.isError && <ApiErrorState error={integrations.error} />}
 
       {integrations.isLoading ? (
         <div className="space-y-3">

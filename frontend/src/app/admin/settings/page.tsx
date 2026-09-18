@@ -2,12 +2,11 @@
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
-import { Alert } from "@/components/ui/Alert";
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { Card } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { SettingRow } from "@/features/admin/settings/components/SettingRow";
 import { useSettings } from "@/features/admin/settings/hooks";
-import { getErrorMessage } from "@/lib/api/get-error-message";
 
 function SettingsContent() {
   const settings = useSettings();
@@ -22,7 +21,7 @@ function SettingsContent() {
         </p>
       </div>
 
-      {settings.isError && <Alert variant="error">{getErrorMessage(settings.error)}</Alert>}
+      {settings.isError && <ApiErrorState error={settings.error} />}
 
       {settings.isLoading ? (
         <div className="space-y-2">

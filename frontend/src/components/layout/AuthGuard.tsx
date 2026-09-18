@@ -6,6 +6,7 @@ import { type ReactNode, useEffect } from "react";
 import { FullPageSpinner } from "@/components/ui/Spinner";
 import { isJwtExpired } from "@/lib/jwt";
 import { useAuthStore } from "@/store/auth-store";
+import { toast } from "@/store/toast-store";
 import type { StaffRole } from "@/types/api";
 
 /**
@@ -49,6 +50,7 @@ export function AuthGuard({
       return;
     }
     if (isWrongRole) {
+      toast.error("You don't have permission to view that page");
       router.replace("/tickets");
     }
   }, [hasHydrated, isExpired, isWrongScope, isWrongRole, loginPath, logout, router]);

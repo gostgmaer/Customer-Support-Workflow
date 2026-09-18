@@ -5,12 +5,11 @@ import { useState } from "react";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
-import { Alert } from "@/components/ui/Alert";
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { Button } from "@/components/ui/Button";
 import { CreateStaffUserDialog } from "@/features/admin/staff/components/CreateStaffUserDialog";
 import { StaffUserTable } from "@/features/admin/staff/components/StaffUserTable";
 import { useStaffUsers } from "@/features/admin/staff/hooks";
-import { getErrorMessage } from "@/lib/api/get-error-message";
 
 function StaffAdminContent() {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -29,7 +28,7 @@ function StaffAdminContent() {
         </Button>
       </div>
 
-      {staffUsers.isError && <Alert variant="error">{getErrorMessage(staffUsers.error)}</Alert>}
+      {staffUsers.isError && <ApiErrorState error={staffUsers.error} />}
 
       <StaffUserTable users={staffUsers.data} isLoading={staffUsers.isLoading} />
 

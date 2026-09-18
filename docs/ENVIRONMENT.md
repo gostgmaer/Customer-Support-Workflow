@@ -2,7 +2,7 @@
 
 Every backend env var this app reads, in one place, with what it's for and
 what to actually set. The canonical source is `app/config/settings.py`
-(backend) and `frontend/.env.local.example` (frontend) - this is a guided
+(backend) and `frontend/.env.example` (frontend) - this is a guided
 tour of those, not a replacement for them.
 
 **None of these are required to run the app.** Every default gives you a

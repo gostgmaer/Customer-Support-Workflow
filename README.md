@@ -190,7 +190,7 @@ short version:
 ```bash
 cd frontend
 pnpm install
-cp .env.local.example .env.local   # NEXT_PUBLIC_API_URL
+cp .env.example .env.local         # NEXT_PUBLIC_API_URL
 pnpm dev                           # http://localhost:3000
 ```
 

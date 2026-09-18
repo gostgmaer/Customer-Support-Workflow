@@ -6,11 +6,10 @@ import { use } from "react";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
-import { Alert } from "@/components/ui/Alert";
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { FullPageSpinner } from "@/components/ui/Spinner";
 import { TicketDetail } from "@/features/tickets/components/TicketDetail";
 import { useTicket } from "@/features/tickets/hooks";
-import { getErrorMessage } from "@/lib/api/get-error-message";
 
 function TicketDetailContent({ ticketId }: { ticketId: string }) {
   const ticket = useTicket(ticketId);
@@ -26,7 +25,7 @@ function TicketDetailContent({ ticketId }: { ticketId: string }) {
       </Link>
 
       {ticket.isLoading && <FullPageSpinner />}
-      {ticket.isError && <Alert variant="error">{getErrorMessage(ticket.error)}</Alert>}
+      {ticket.isError && <ApiErrorState error={ticket.error} />}
       {ticket.data && <TicketDetail ticket={ticket.data} />}
     </div>
   );

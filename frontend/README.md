@@ -14,7 +14,7 @@ Query · Zustand · React Hook Form + Zod · lucide-react
 
 ```bash
 pnpm install
-cp .env.local.example .env.local   # NEXT_PUBLIC_API_URL, defaults to http://localhost:8000
+cp .env.example .env.local         # NEXT_PUBLIC_API_URL, defaults to http://localhost:8000
 pnpm dev                           # http://localhost:3000
 ```
 

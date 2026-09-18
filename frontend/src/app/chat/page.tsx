@@ -2,12 +2,11 @@
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
-import { Alert } from "@/components/ui/Alert";
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { FullPageSpinner } from "@/components/ui/Spinner";
 import { useSession } from "@/features/auth/hooks";
 import { ChatThread } from "@/features/chat/components/ChatThread";
 import { useConversationBootstrap } from "@/features/chat/hooks";
-import { getErrorMessage } from "@/lib/api/get-error-message";
 
 function ChatPageContent() {
   const session = useSession();
@@ -17,9 +16,7 @@ function ChatPageContent() {
   if (error) {
     return (
       <div className="mx-auto max-w-md py-16">
-        <Alert variant="error" title="Couldn't start a conversation">
-          {getErrorMessage(error)}
-        </Alert>
+        <ApiErrorState error={error} />
       </div>
     );
   }

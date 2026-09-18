@@ -4,12 +4,11 @@ import { useState } from "react";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
-import { Alert } from "@/components/ui/Alert";
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { StatusFilterTabs } from "@/features/tickets/components/StatusFilterTabs";
 import { TicketQueueTable } from "@/features/tickets/components/TicketQueueTable";
 import { TicketStatsRow } from "@/features/tickets/components/TicketStatsRow";
 import { useTickets } from "@/features/tickets/hooks";
-import { getErrorMessage } from "@/lib/api/get-error-message";
 
 function TicketQueueContent() {
   const [status, setStatus] = useState<string | undefined>("open");
@@ -32,7 +31,7 @@ function TicketQueueContent() {
         <StatusFilterTabs value={status} onChange={setStatus} />
       </div>
 
-      {filteredTickets.isError && <Alert variant="error">{getErrorMessage(filteredTickets.error)}</Alert>}
+      {filteredTickets.isError && <ApiErrorState error={filteredTickets.error} />}
 
       <TicketQueueTable tickets={filteredTickets.data} isLoading={filteredTickets.isLoading} />
     </div>
