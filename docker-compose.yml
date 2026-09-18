@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: support
+      POSTGRES_PASSWORD: support
+      POSTGRES_DB: support
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U support"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+
+  # A committed fixture standing in for a real external e-commerce
+  # storefront (spec: Phase 8.1) - not production code, see
+  # demo_storefront/main.py's docstring. Gives storefront-primary commerce
+  # routing (app.agents.resolution.resolve_via_storefront) a permanent,
+  # repeatable target instead of the throwaway host.docker.internal
+  # fixture used to live-verify Phase A2.
+  demo_storefront:
+    build: ./demo_storefront
+    ports:
+      - "${DEMO_STOREFRONT_HOST_PORT:-8100}:8000"
+
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://support:support@postgres:5432/support
+      VECTOR_BACKEND: pgvector
+      REDIS_URL: redis://redis:6379/0
+      USE_REDIS: "true"
+      MOCK_LLM: ${MOCK_LLM:-true}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-google}
+      FALLBACK_LLM_PROVIDER: ${FALLBACK_LLM_PROVIDER:-xai}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:-}
+      # spec: Phase 9.1a - "sqlite" (default) keeps today's single-instance
+      # behavior unchanged; set to "postgres" (e.g. `CHECKPOINT_BACKEND=postgres
+      # docker compose up`) to exercise the multi-instance-safe backend
+      # against this stack's real Postgres service - see docs/DEPLOYMENT.md.
+      CHECKPOINT_BACKEND: ${CHECKPOINT_BACKEND:-sqlite}
+      # spec: Phase 10.4 - only used by a "docs" integration with
+      # config.provider "google_drive"/"sharepoint"; blank is fine otherwise.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
+      MICROSOFT_OAUTH_CLIENT_ID: ${MICROSOFT_OAUTH_CLIENT_ID:-}
+      MICROSOFT_OAUTH_CLIENT_SECRET: ${MICROSOFT_OAUTH_CLIENT_SECRET:-}
+      MICROSOFT_OAUTH_TENANT_ID: ${MICROSOFT_OAUTH_TENANT_ID:-common}
+      MICROSOFT_OAUTH_REDIRECT_URI: ${MICROSOFT_OAUTH_REDIRECT_URI:-}
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head && python -m app.scripts.setup_checkpointer && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  postgres_data:

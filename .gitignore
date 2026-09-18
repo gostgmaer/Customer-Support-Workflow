@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.local
+data/
+*.db
+*.db-journal
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+.idea/
+.vscode/
+
+# Claude Code local runtime state - never shared/checked in
+.claude/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+*.log
+
+# Defensive: this repo's only package.json lives in frontend/ (which has
+# its own .gitignore) - catches a stray root-level install by mistake.
+/node_modules/

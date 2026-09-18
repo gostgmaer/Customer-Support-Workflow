@@ -1,0 +1,93 @@
+[project]
+name = "customer-support-workflow"
+version = "0.1.0"
+description = "Production-grade AI customer support workflow (FastAPI + LangGraph + LangChain)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic[email]>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "langgraph>=0.2.50",
+    # >=3.1.0, not just >=2.0.0: 2.0.11 calls aiosqlite.Connection.is_alive()
+    # unconditionally, a method the currently-installed aiosqlite (0.22.1)
+    # doesn't have - AttributeError on every single workflow run, discovered
+    # when a fresh, unconstrained `pip install .` (Docker) resolved 2.0.11
+    # while an incrementally-updated local venv had already picked up
+    # 3.1.1, which checks `getattr(aiosqlite.Connection, "is_alive", None)`
+    # defensively before calling it. Floor pinned so this can't silently
+    # regress on the next fresh install.
+    "langgraph-checkpoint-sqlite>=3.1.0",
+    # spec: Phase 9.1a - opt-in multi-instance checkpointer backend
+    # (CHECKPOINT_BACKEND=postgres), used alongside (not instead of) the
+    # sqlite one above, which stays the zero-setup default. Needs a real
+    # libpq wrapper to connect - psycopg[binary] ships one as a wheel so
+    # no system libpq install is required (verified: without it, `import
+    # psycopg` raises "no pq wrapper available" on both Windows and the
+    # Debian-slim Docker image this project's Dockerfile is based on).
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "psycopg[binary]>=3.2.0",
+    "langchain-core>=0.3.15",
+    "langchain-anthropic>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "langchain-xai>=0.2.0",
+    "langsmith>=0.1.0",
+    "anthropic>=0.39.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiosqlite>=0.20.0",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "numpy>=1.26.0",
+    "pyyaml>=6.0.2",
+    "tenacity>=9.0.0",
+    "redis>=5.0.0",
+    "pyjwt>=2.9.0",
+    "bcrypt>=4.2.0",
+    "python-multipart>=0.0.12",
+    "httpx>=0.27.0",
+    "cryptography>=42.0.0",
+    "structlog>=24.4.0",
+    "prometheus-client>=0.21.0",
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "mcp>=2.0,<3",
+    "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "locust>=2.32.0",
+    "respx>=0.21.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["UP047"]  # PEP 695 generic syntax not required; TypeVar-based generics are fine
+
+[tool.ruff.lint.per-file-ignores]
+"app/api/routes/*.py" = ["B008"]  # FastAPI's Depends() pattern requires call-in-default
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
