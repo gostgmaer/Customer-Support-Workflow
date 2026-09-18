@@ -41,26 +41,7 @@ function buildUrl(path: string, query?: RequestOptions["query"]): string {
   return url.toString();
 }
 
-/**
- * The one place that calls `fetch()` in this app (see repository
- * conventions: "components should never call HTTP directly"). Every
- * feature's `api.ts` goes through this.
- */
-export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, query, anonymous } = options;
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (!anonymous) {
-    const token = useAuthStore.getState().session?.token;
-    if (token) headers.Authorization = `Bearer ${token}`;
-  }
-
-  const response = await fetch(buildUrl(path, query), {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-
+async function handleResponse<T>(response: Response, anonymous: boolean | undefined): Promise<T> {
   if (response.status === 204) {
     return undefined as T;
   }
@@ -85,4 +66,43 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   }
 
   return payload as T;
+}
+
+/**
+ * The one place that calls `fetch()` in this app (see repository
+ * conventions: "components should never call HTTP directly"). Every
+ * feature's `api.ts` goes through this.
+ */
+export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { method = "GET", body, query, anonymous } = options;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (!anonymous) {
+    const token = useAuthStore.getState().session?.token;
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+
+  const response = await fetch(buildUrl(path, query), {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+
+  return handleResponse<T>(response, anonymous);
+}
+
+/**
+ * Multipart file upload - deliberately separate from `apiFetch` rather
+ * than a `body: FormData` branch there: a `FormData` body must NOT get an
+ * explicit `Content-Type` header (the browser sets one itself, including
+ * the multipart boundary), whereas `apiFetch` always sends
+ * `application/json`. Same auth/error handling as `apiFetch` otherwise.
+ */
+export async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
+  const headers: Record<string, string> = {};
+  const token = useAuthStore.getState().session?.token;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(buildUrl(path), { method: "POST", headers, body: formData });
+  return handleResponse<T>(response, false);
 }

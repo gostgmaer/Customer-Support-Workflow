@@ -51,7 +51,7 @@ export function AuthGuard({
     }
     if (isWrongRole) {
       toast.error("You don't have permission to view that page");
-      router.replace("/tickets");
+      router.replace("/dashboard");
     }
   }, [hasHydrated, isExpired, isWrongScope, isWrongRole, loginPath, logout, router]);
 

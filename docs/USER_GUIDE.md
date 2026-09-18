@@ -69,9 +69,40 @@ in as a customer. You land on `/chat`.
   you'll see it reflected without manually refreshing, as long as you have
   that conversation open in your browser at the time.
 
+## Staff: the dashboard
+
+Log in at `/staff/login` with a staff account. You land on `/dashboard` - a
+live overview built entirely from real ticket data (no separate stats
+endpoint): a status bar (open/awaiting-approval/resolved/critical-open
+counts), open tickets broken down by priority, a "needs attention" list of
+the highest-priority open tickets, and a spotlight of the knowledge base's
+most-viewed articles. Everything links through to the full ticket queue or
+knowledge base.
+
+## Staff: the knowledge base
+
+`/knowledge-base` is a searchable view over the same documents the AI draws
+on during a conversation (ingested via `make seed`, a connected `docs`
+integration, or a direct upload - see below). Browse by category, search by
+keyword, or open an article to read it in full, see related articles in
+the same category, and vote whether it was helpful - votes and view counts
+feed the "popular articles" ranking shown here and on the dashboard.
+
+**Adding an article (ADMIN only)**: click **Add article** and upload a
+`.md` or `.txt` file with a title and category. It's ingested into the
+exact same pipeline `make seed` uses - chunked, embedded, and stored - so
+it's immediately both browsable here *and* something the AI can pull from
+the next time a customer asks a matching question in chat (e.g. uploading
+a return policy means the AI can now answer "what's your return policy?"
+by citing it). There's no in-place editor yet: to change an existing
+article's content, edit the source files under `scripts/seed/knowledge/`
+and re-run `make seed`, or re-sync a connected docs integration - a direct
+upload always creates a new article rather than replacing one.
+
 ## Staff: the ticket queue
 
-Log in at `/staff/login` with a staff account. You land on `/tickets`.
+Log in at `/staff/login` with a staff account, then go to `/tickets` from
+the sidebar (or the dashboard's "View full queue" link).
 
 - **The queue**: filterable by status (open/resolved/rejected/etc.), scoped
   to what your role is allowed to see - a `SUPPORT_AGENT` never sees

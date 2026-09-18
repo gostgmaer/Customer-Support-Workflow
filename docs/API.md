@@ -273,6 +273,41 @@ ticket requires `SECURITY_AGENT` or `ADMIN` - a `SUPPORT_AGENT` or
 including `GET`. Every other ticket intent accepts
 `SUPPORT_AGENT`/`SUPPORT_MANAGER`/`ADMIN`.
 
+## Knowledge base (staff-only, any role unless noted - `Authorization: Bearer <staff JWT>`)
+
+```
+GET  /api/v1/knowledge/categories                              -> [{category, article_count}, ...]
+GET  /api/v1/knowledge/articles?category=&q=&sort=recent|popular&limit=50  -> [ArticleSummary, ...]
+GET  /api/v1/knowledge/articles/{id}                            -> ArticleDetail
+GET  /api/v1/knowledge/articles/{id}/related                    -> [ArticleSummary, ...]
+POST /api/v1/knowledge/articles/{id}/feedback   body: {"helpful": true|false} -> ArticleDetail
+POST /api/v1/knowledge/upload   (ADMIN only)   multipart: title, category, file  -> 201 ArticleDetail
+```
+
+Browse/search/feedback are read-only over the same `knowledge_documents`
+table the RAG pipeline retrieves from during a support conversation
+(`app.rag.ingest`/`app.rag.docs_ingest`/`app.rag.retriever`). `category` is
+free text (whatever `KnowledgeDocument.category` holds), not a fixed enum.
+
+`GET /articles/{id}` increments `view_count` on every call (used to rank
+"popular articles"); `POST .../feedback` increments `helpful_yes_count`/
+`helpful_no_count` (used for `helpful_percent`, `null` until at least one
+vote exists). Both explicitly re-pin `updated_at` to its own value in the
+same UPDATE so a mere read/vote never looks like a content edit - the
+"recently updated" list sorts by `updated_at`, and TimestampMixin's
+`onupdate` would otherwise bump it on every view.
+
+**`POST /upload`** is the one write path in this router - it runs a
+manually-uploaded `.md`/`.txt` file (2MB max, UTF-8 text only) through the
+exact same chunk/embed/vector-store pipeline `make seed` and a docs
+integration's sync use (`app.rag.ingest.ingest_documents`), so the new
+article is retrievable by the AI in the very next customer message, not a
+disconnected copy that only shows up in this browse UI. Every upload
+creates a new document (its `source` is always a fresh
+`upload:<uuid>:<filename>`) rather than trying to detect "is this an
+update to an existing article" - that dedupe/version-bump behavior belongs
+to automated docs-integration syncs, not a one-off manual upload.
+
 ## Integrations (JIRA / WooCommerce / email / custom APIs / MCP servers / OpenAPI APIs / docs / Stripe)
 
 ```

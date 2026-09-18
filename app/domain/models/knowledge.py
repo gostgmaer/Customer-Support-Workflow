@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, ForeignKey, String, Text
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UTCDateTime, new_uuid
@@ -20,6 +20,12 @@ class KnowledgeDocument(Base, TimestampMixin, TenantScopedMixin):
     expiration_date: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     language: Mapped[str] = mapped_column(String(10), default="en")
     raw_text: Mapped[str] = mapped_column(Text)
+    # Knowledge-base browse UI engagement counters (spec: help-desk-kit-style
+    # KB) - incremented by the read/feedback endpoints in
+    # app.api.routes.knowledge, not touched by ingestion.
+    view_count: Mapped[int] = mapped_column(Integer, default=0)
+    helpful_yes_count: Mapped[int] = mapped_column(Integer, default=0)
+    helpful_no_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class KnowledgeChunk(Base, TimestampMixin, TenantScopedMixin):

@@ -57,7 +57,7 @@ export function useStaffLogin() {
     onSuccess: (data, variables) => {
       setSession({ scope: "staff", token: data.access_token, id: variables.username, role: data.role });
       toast.success("Signed in");
-      router.push("/tickets");
+      router.push("/dashboard");
     },
   });
 }

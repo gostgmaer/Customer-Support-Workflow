@@ -140,3 +140,33 @@ export interface SystemSetting {
   updated_by: string | null;
   updated_at: string | null;
 }
+
+export interface KnowledgeCategorySummary {
+  category: string;
+  article_count: number;
+}
+
+export interface KnowledgeArticleSummary {
+  id: string;
+  title: string;
+  category: string;
+  summary: string;
+  view_count: number;
+  helpful_percent: number | null;
+  updated_at: string;
+}
+
+export interface KnowledgeArticleDetail {
+  id: string;
+  title: string;
+  category: string;
+  source: string;
+  version: string;
+  raw_text: string;
+  view_count: number;
+  helpful_yes_count: number;
+  helpful_no_count: number;
+  helpful_percent: number | null;
+  created_at: string;
+  updated_at: string;
+}

@@ -14,6 +14,7 @@ from app.api.routes import (
     customers,
     health,
     integrations,
+    knowledge,
     oauth_callback,
     staff,
     support,
@@ -109,3 +110,4 @@ app.include_router(integrations.admin_router)
 app.include_router(integrations.support_router)
 app.include_router(webhooks.router)
 app.include_router(oauth_callback.router)
+app.include_router(knowledge.router)

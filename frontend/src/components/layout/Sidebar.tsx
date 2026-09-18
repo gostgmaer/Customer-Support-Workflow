@@ -1,6 +1,6 @@
 "use client";
 
-import { Inbox, LogOut, Plug, Settings, Users, X } from "lucide-react";
+import { BookOpen, Inbox, LayoutDashboard, LogOut, Plug, Settings, Users, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
@@ -17,7 +17,11 @@ interface NavItem {
   icon: LucideIcon;
 }
 
-const MAIN_ITEMS: NavItem[] = [{ href: "/tickets", label: "Tickets", icon: Inbox }];
+const MAIN_ITEMS: NavItem[] = [
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/tickets", label: "Tickets", icon: Inbox },
+  { href: "/knowledge-base", label: "Knowledge Base", icon: BookOpen },
+];
 
 const ADMIN_ITEMS: NavItem[] = [
   { href: "/admin/staff", label: "Staff", icon: Users },
@@ -60,10 +64,15 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       </div>
 
       <nav className="flex-1 space-y-4 overflow-y-auto px-3 py-4" aria-label="Primary">
-        <div className="space-y-0.5">
-          {MAIN_ITEMS.map((item) => (
-            <NavLink key={item.href} item={item} onNavigate={onNavigate} />
-          ))}
+        <div>
+          <p className="px-2.5 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-chrome-muted">
+            Workspace
+          </p>
+          <div className="space-y-0.5">
+            {MAIN_ITEMS.map((item) => (
+              <NavLink key={item.href} item={item} onNavigate={onNavigate} />
+            ))}
+          </div>
         </div>
 
         {isAdmin && (

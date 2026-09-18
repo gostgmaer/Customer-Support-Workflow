@@ -18,7 +18,7 @@ export default function HomePage() {
   useEffect(() => {
     if (!hasHydrated) return;
     if (session?.scope === "customer") router.replace("/chat");
-    if (session?.scope === "staff") router.replace("/tickets");
+    if (session?.scope === "staff") router.replace("/dashboard");
   }, [hasHydrated, session, router]);
 
   if (!hasHydrated || session) return <FullPageSpinner />;
