@@ -66,4 +66,5 @@ PURPOSE_TO_PROFILE: dict[str, str] = {
     "policy_check": "reasoning",
     "grounding_check": "reasoning",
     "response_review": "reasoning",
+    "knowledge_qa": "response",
 }

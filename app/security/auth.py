@@ -90,6 +90,26 @@ async def get_current_customer_id(authorization: str | None = Header(default=Non
     return customer_id
 
 
+async def get_current_user(authorization: str | None = Header(default=None)) -> tuple[str, str, str]:
+    """Returns (user_id, scope, tenant_id) - accepts EITHER a customer or a
+    staff bearer token, unlike every other dependency in this module which
+    enforces exactly one. For endpoints deliberately open to any
+    authenticated user regardless of which portal they signed into (spec:
+    the shared knowledge-base "ask" chat) - not a general-purpose
+    replacement for the scope-specific dependencies above, which stay the
+    right choice whenever an endpoint's data or side effects are
+    inherently customer- or staff-only."""
+    payload = _decode(_bearer_token(authorization))
+    scope = payload.get("scope")
+    tenant_id = payload.get("tenant_id", DEFAULT_TENANT_ID)
+    if scope not in ("customer", "staff"):
+        raise AuthenticationError("Token is not a valid customer or staff access token")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise AuthenticationError("Access token missing subject")
+    return user_id, scope, tenant_id
+
+
 # --- Staff tokens (spec §18/§26: ticket approve/reject is a separate trust
 # boundary - see docs/SECURITY.md) ---
 

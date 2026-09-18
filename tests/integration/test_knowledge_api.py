@@ -227,3 +227,92 @@ async def test_repeated_uploads_of_the_same_filename_both_create_distinct_articl
     assert first.status_code == 201
     assert second.status_code == 201
     assert first.json()["id"] != second.json()["id"]
+
+
+async def _seed_ingested_article(client, admin_staff_token, *, title: str, category: str, content: bytes):
+    """Unlike `_make_article` (a bare DB row), `/ask` retrieves from the
+    vector store - seed through the real upload endpoint so a genuine
+    chunk+embedding exists to be found."""
+    files = {"file": (f"{title.lower().replace(' ', '_')}.md", content, "text/markdown")}
+    data = {"title": title, "category": category}
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+    response = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_staff_can_ask_and_gets_a_grounded_answer_with_sources(client, admin_staff_token):
+    await _seed_ingested_article(
+        client,
+        admin_staff_token,
+        title="Return Policy",
+        category="returns",
+        content=b"Customers may return an item within 30 days of purchase under our return policy.",
+    )
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+    response = await client.post(
+        "/api/v1/knowledge/ask", json={"question": "What is your return policy?"}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["grounded"] is True
+    assert body["answer"]
+    assert any(s["title"] == "Return Policy" for s in body["sources"])
+
+
+@pytest.mark.asyncio
+async def test_customer_can_ask_the_same_endpoint(client, admin_staff_token, auth_token):
+    await _seed_ingested_article(
+        client,
+        admin_staff_token,
+        title="Shipping Policy",
+        category="shipping",
+        content=b"Standard shipping takes 5 to 7 business days within the country of purchase.",
+    )
+
+    # The test env's HashingEmbedder is purely lexical (app.rag.embeddings) -
+    # the query must share actual words with the content, matching this
+    # file's other retrieval-proving tests' precedent.
+    response = await client.post(
+        "/api/v1/knowledge/ask",
+        json={"question": "How many business days does standard shipping take?"},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["grounded"] is True
+    assert any(s["title"] == "Shipping Policy" for s in body["sources"])
+
+
+@pytest.mark.asyncio
+async def test_ask_requires_authentication(client):
+    response = await client.post("/api/v1/knowledge/ask", json={"question": "Anything?"})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_ask_with_no_matching_content_is_not_grounded(client, staff_token):
+    response = await client.post(
+        "/api/v1/knowledge/ask",
+        json={"question": "What is the airspeed velocity of an unladen swallow?"},
+        headers={"Authorization": f"Bearer {staff_token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["grounded"] is False
+    assert body["sources"] == []
+    assert body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_ask_rejects_blank_question(client, staff_token):
+    response = await client.post(
+        "/api/v1/knowledge/ask", json={"question": "   "}, headers={"Authorization": f"Bearer {staff_token}"}
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_ERROR"

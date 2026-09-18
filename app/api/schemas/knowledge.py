@@ -35,3 +35,19 @@ class KnowledgeArticleDetail(BaseModel):
 
 class KnowledgeFeedbackRequest(BaseModel):
     helpful: bool
+
+
+class KnowledgeAskRequest(BaseModel):
+    question: str
+
+
+class KnowledgeAskSource(BaseModel):
+    id: str
+    title: str
+    category: str
+
+
+class KnowledgeAskResponse(BaseModel):
+    answer: str
+    grounded: bool
+    sources: list[KnowledgeAskSource]

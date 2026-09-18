@@ -1,5 +1,10 @@
 import { apiFetch, apiUpload } from "@/lib/api/client";
-import type { KnowledgeArticleDetail, KnowledgeArticleSummary, KnowledgeCategorySummary } from "@/types/api";
+import type {
+  KnowledgeArticleDetail,
+  KnowledgeArticleSummary,
+  KnowledgeAskResponse,
+  KnowledgeCategorySummary,
+} from "@/types/api";
 
 export function listKnowledgeCategories() {
   return apiFetch<KnowledgeCategorySummary[]>("/api/v1/knowledge/categories");
@@ -32,4 +37,11 @@ export function uploadKnowledgeDocument(input: { title: string; category: string
   formData.set("category", input.category);
   formData.set("file", input.file);
   return apiUpload<KnowledgeArticleDetail>("/api/v1/knowledge/upload", formData);
+}
+
+export function askKnowledgeBase(question: string) {
+  return apiFetch<KnowledgeAskResponse>("/api/v1/knowledge/ask", {
+    method: "POST",
+    body: { question },
+  });
 }

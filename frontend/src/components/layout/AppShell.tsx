@@ -1,16 +1,37 @@
 "use client";
 
-import { LogOut, Menu } from "lucide-react";
+import { LogOut, Menu, MessageCircleQuestion, MessagesSquare } from "lucide-react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 import type { ReactNode } from "react";
 
 import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
 import { useLogout, useSession } from "@/features/auth/hooks";
+import { cn } from "@/lib/utils/cn";
 
 import { Logo } from "./Logo";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
+
+function CustomerNavLink({ href, label, icon: Icon }: { href: string; label: string; icon: typeof MessagesSquare }) {
+  const pathname = usePathname();
+  const active = pathname.startsWith(href);
+
+  return (
+    <Link
+      href={href}
+      className={cn(
+        "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors",
+        active ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
+      )}
+    >
+      <Icon className="size-4" aria-hidden="true" />
+      <span className="hidden sm:inline">{label}</span>
+    </Link>
+  );
+}
 
 function CustomerHeader() {
   const session = useSession();
@@ -21,14 +42,16 @@ function CustomerHeader() {
       <div className="mx-auto flex h-14 max-w-3xl items-center justify-between px-4">
         <Logo on="content" />
         {session?.scope === "customer" && (
-          <div className="flex items-center gap-3">
-            <div className="hidden items-center gap-2 sm:flex">
+          <div className="flex items-center gap-1">
+            <CustomerNavLink href="/chat" label="Chat" icon={MessagesSquare} />
+            <CustomerNavLink href="/ask" label="Ask" icon={MessageCircleQuestion} />
+            <div className="mx-1 hidden items-center gap-2 sm:flex">
               <Avatar name={session.name} />
               <span className="text-sm font-medium text-foreground">{session.name}</span>
             </div>
             <Button variant="ghost" size="sm" onClick={logout}>
               <LogOut className="size-4" aria-hidden="true" />
-              Sign out
+              <span className="hidden sm:inline">Sign out</span>
             </Button>
           </div>
         )}

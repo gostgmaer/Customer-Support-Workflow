@@ -282,6 +282,7 @@ GET  /api/v1/knowledge/articles/{id}                            -> ArticleDetail
 GET  /api/v1/knowledge/articles/{id}/related                    -> [ArticleSummary, ...]
 POST /api/v1/knowledge/articles/{id}/feedback   body: {"helpful": true|false} -> ArticleDetail
 POST /api/v1/knowledge/upload   (ADMIN only)   multipart: title, category, file  -> 201 ArticleDetail
+POST /api/v1/knowledge/ask   (customer OR staff JWT)   body: {"question": str} -> AskResponse
 ```
 
 Browse/search/feedback are read-only over the same `knowledge_documents`
@@ -307,6 +308,23 @@ creates a new document (its `source` is always a fresh
 `upload:<uuid>:<filename>`) rather than trying to detect "is this an
 update to an existing article" - that dedupe/version-bump behavior belongs
 to automated docs-integration syncs, not a one-off manual upload.
+
+**`POST /ask`** is the only route in this router (and one of very few in
+the whole API) deliberately open to *either* a customer or a staff token -
+`app.security.auth.get_current_user`, a dual-scope dependency that exists
+solely for this shared "ask the knowledge base" chat. It retrieves from
+the same tenant-scoped vector index `knowledge_search_node` uses during a
+real support conversation, then drafts an answer via the same
+`draft_response` helper the support workflow itself uses - never a bare,
+ungrounded LLM call. Response shape:
+`{"answer": str, "grounded": bool, "sources": [{"id", "title", "category"}, ...]}`.
+When nothing in the knowledge base is relevant (below the tenant's
+retrieval confidence threshold), `grounded` is `false`, `sources` is
+empty, and `answer` is a fixed "couldn't find anything" message - never a
+hallucinated guess. This route creates no ticket, conversation, or any
+other record; it's a stateless, ephemeral lookup, not a replacement for
+`POST /api/v1/support/messages` (which still owns tool calls, escalation,
+and ticket creation).
 
 ## Integrations (JIRA / WooCommerce / email / custom APIs / MCP servers / OpenAPI APIs / docs / Stripe)
 

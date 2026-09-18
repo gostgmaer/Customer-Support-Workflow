@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "@/store/toast-store";
 
 import {
+  askKnowledgeBase,
   getKnowledgeArticle,
   getRelatedKnowledgeArticles,
   listKnowledgeArticles,
@@ -60,5 +61,12 @@ export function useUploadKnowledgeDocument() {
       queryClient.invalidateQueries({ queryKey: ["knowledge-articles"] });
     },
     onError: (error) => toast.error("Upload failed", error instanceof Error ? error.message : undefined),
+  });
+}
+
+export function useAskKnowledgeBase() {
+  return useMutation({
+    mutationFn: askKnowledgeBase,
+    onError: (error) => toast.error("Couldn't get an answer", error instanceof Error ? error.message : undefined),
   });
 }

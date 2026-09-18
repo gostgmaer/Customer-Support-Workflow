@@ -69,6 +69,17 @@ in as a customer. You land on `/chat`.
   you'll see it reflected without manually refreshing, as long as you have
   that conversation open in your browser at the time.
 
+### Asking the knowledge base directly (`/ask`)
+
+A second, lighter option alongside the main chat: `/ask` (linked from the
+header) is a quick Q&A - type a question, get an answer sourced only from
+the knowledge base, with links to the articles it drew from. Unlike the
+main chat, it never looks at your account, creates no ticket or
+conversation, and can't take any action (no refunds, no order lookups) -
+it's for "what's your policy on X," not "do X for me." If it can't find
+anything relevant it says so honestly rather than guessing; switch to
+**Chat** for anything account-specific or that needs a real action taken.
+
 ## Staff: the dashboard
 
 Log in at `/staff/login` with a staff account. You land on `/dashboard` - a
@@ -87,6 +98,13 @@ integration, or a direct upload - see below). Browse by category, search by
 keyword, or open an article to read it in full, see related articles in
 the same category, and vote whether it was helpful - votes and view counts
 feed the "popular articles" ranking shown here and on the dashboard.
+
+Switch to the **Ask** tab for a chat-style alternative to browsing: type a
+question and get an answer drafted from the retrieved articles, with
+citations - the same shared `/ask` chat customers get at `/ask`, just
+reachable from inside the console instead of a separate page. Handy for
+quickly checking what the AI would say before it comes up in a real
+conversation.
 
 **Adding an article (ADMIN only)**: click **Add article** and upload a
 `.md` or `.txt` file with a title and category. It's ingested into the

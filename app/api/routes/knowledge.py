@@ -1,13 +1,16 @@
-"""Staff-facing Knowledge Base API (spec: help-desk-kit-style KB) over the
-same `knowledge_documents`/`knowledge_chunks` tables the RAG pipeline
-retrieves from during a support conversation (app.rag.ingest /
-app.rag.docs_ingest / app.rag.retriever). Browse/search/feedback are
-read-only; `POST /upload` (ADMIN only) is the one write path here - it
-runs a manually-uploaded file through the exact same
-chunk-embed-store pipeline `make seed`/a docs-integration sync uses, so an
-uploaded document is immediately both visible in this browse UI *and*
-retrievable by the AI in chat (e.g. "what's your return policy?"), not a
-separate, disconnected copy.
+"""Knowledge Base API (spec: help-desk-kit-style KB) over the same
+`knowledge_documents`/`knowledge_chunks` tables the RAG pipeline retrieves
+from during a support conversation (app.rag.ingest / app.rag.docs_ingest /
+app.rag.retriever). Browse/search/feedback/upload are staff-only
+(`RequireStaff`/`RequireAdmin`); `POST /ask` is the one route open to
+customers too (`RequireAnyUser`) - it's a stateless RAG Q&A chat shared by
+both portals, not a replacement for the customer support ticket flow
+(app.api.routes.support), which still owns tool calls/escalation/tickets.
+`POST /upload` (ADMIN only) runs a manually-uploaded file through the
+exact same chunk-embed-store pipeline `make seed`/a docs-integration sync
+uses, so an uploaded document is immediately both visible in the browse UI
+*and* retrievable by `/ask` and the support chat, not a separate,
+disconnected copy.
 """
 
 from __future__ import annotations
@@ -18,24 +21,38 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.resolution import draft_response
 from app.api.schemas.knowledge import (
     KnowledgeArticleDetail,
     KnowledgeArticleSummary,
+    KnowledgeAskRequest,
+    KnowledgeAskResponse,
     KnowledgeCategorySummary,
     KnowledgeFeedbackRequest,
 )
+from app.config import get_settings
+from app.config.dynamic_settings import get_effective_settings
 from app.db.session import get_db
 from app.domain.exceptions import ValidationError
 from app.domain.models import KnowledgeDocument
+from app.llm.router import TenantScopedLLMRouter, get_llm_router
 from app.rag.ingest import ingest_documents
 from app.rag.loaders import LoadedDocument, clean_text
+from app.rag.retriever import Retriever
 from app.repositories.knowledge import KnowledgeDocumentRepository
-from app.security.auth import require_staff_role
+from app.repositories.vector_store import get_vector_store
+from app.security.auth import get_current_user, require_staff_role
 
 router = APIRouter(prefix="/api/v1/knowledge", tags=["knowledge"])
 
 RequireStaff = Depends(require_staff_role())
 RequireAdmin = Depends(require_staff_role("ADMIN"))
+RequireAnyUser = Depends(get_current_user)
+
+_NOT_FOUND_ANSWER = (
+    "I couldn't find anything in the knowledge base about that. Try rephrasing your "
+    "question, or a team member can help if you're not sure."
+)
 
 _SUMMARY_LENGTH = 180
 # A support-doc upload (policy pages, FAQs) has no business being large;
@@ -221,3 +238,53 @@ async def upload_knowledge_document(
         # fabricated response if this is ever somehow unreachable.
         raise ValidationError("Upload succeeded but the new article could not be re-read")
     return _to_detail(stored)
+
+
+@router.post("/ask", response_model=KnowledgeAskResponse)
+async def ask_knowledge_base(
+    body: KnowledgeAskRequest,
+    session: AsyncSession = Depends(get_db),
+    user: tuple[str, str, str] = RequireAnyUser,
+) -> dict:
+    """Stateless RAG Q&A: retrieves against the same tenant-scoped vector
+    index the support chat uses (app.workflow.nodes.route_nodes.knowledge_search_node),
+    then drafts an answer strictly from what was retrieved via the same
+    `draft_response` helper the support workflow itself uses for its
+    resolution responses - never a bare LLM call with no grounding. Open
+    to both customers and staff (RequireAnyUser); creates no ticket,
+    conversation, or any other record - purely an ephemeral lookup.
+    """
+    _user_id, _scope, tenant_id = user
+    question = body.question.strip()
+    if not question:
+        raise ValidationError("question is required")
+
+    effective = await get_effective_settings(session, tenant_id)
+    settings = get_settings()
+    vector_store = get_vector_store(session if settings.vector_backend == "pgvector" else None)
+    docs = await Retriever(vector_store).retrieve(
+        question, tenant_id=tenant_id, min_score=effective.confidence_retrieval
+    )
+
+    if not docs:
+        return {"answer": _NOT_FOUND_ANSWER, "grounded": False, "sources": []}
+
+    llm_router = TenantScopedLLMRouter(
+        get_llm_router(),
+        mock_llm=effective.mock_llm,
+        default_provider=effective.default_llm_provider,
+        fallback_provider=effective.fallback_llm_provider,
+    )
+    llm = llm_router.get_model("knowledge_qa")
+    facts = [f"[{d.title}] {d.text}" for d in docs]
+    answer = await draft_response(llm, message=question, facts=facts)
+
+    seen_ids: set[str] = set()
+    sources = []
+    for d in docs:
+        if d.document_id in seen_ids:
+            continue
+        seen_ids.add(d.document_id)
+        sources.append({"id": d.document_id, "title": d.title, "category": d.category})
+
+    return {"answer": answer, "grounded": True, "sources": sources}

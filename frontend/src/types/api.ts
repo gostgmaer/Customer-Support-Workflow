@@ -170,3 +170,15 @@ export interface KnowledgeArticleDetail {
   created_at: string;
   updated_at: string;
 }
+
+export interface KnowledgeAskSource {
+  id: string;
+  title: string;
+  category: string;
+}
+
+export interface KnowledgeAskResponse {
+  answer: string;
+  grounded: boolean;
+  sources: KnowledgeAskSource[];
+}
