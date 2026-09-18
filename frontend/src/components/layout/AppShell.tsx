@@ -10,6 +10,7 @@ import { useLogout, useSession } from "@/features/auth/hooks";
 
 import { Logo } from "./Logo";
 import { Sidebar } from "./Sidebar";
+import { TopBar } from "./TopBar";
 
 function CustomerHeader() {
   const session = useSession();
@@ -56,6 +57,7 @@ function StaffLayout({ children }: { children: ReactNode }) {
             <Logo on="content" />
           </div>
         </div>
+        <TopBar />
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-8">{children}</main>
       </div>
     </div>

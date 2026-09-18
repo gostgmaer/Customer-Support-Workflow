@@ -7,6 +7,8 @@ import type { LucideIcon } from "lucide-react";
 
 import { Avatar } from "@/components/ui/Avatar";
 import { useLogout, useSession } from "@/features/auth/hooks";
+import { useKnowledgeArticles } from "@/features/knowledge/hooks";
+import { useTickets } from "@/features/tickets/hooks";
 import { cn } from "@/lib/utils/cn";
 
 import { Logo } from "./Logo";
@@ -15,13 +17,8 @@ interface NavItem {
   href: string;
   label: string;
   icon: LucideIcon;
+  badge?: number;
 }
-
-const MAIN_ITEMS: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/tickets", label: "Tickets", icon: Inbox },
-  { href: "/knowledge-base", label: "Knowledge Base", icon: BookOpen },
-];
 
 const ADMIN_ITEMS: NavItem[] = [
   { href: "/admin/staff", label: "Staff", icon: Users },
@@ -40,14 +37,21 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void 
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "group flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors",
+        "group flex items-center justify-between gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors",
         active
           ? "bg-chrome-active text-chrome-foreground"
           : "text-chrome-muted hover:bg-chrome-hover hover:text-chrome-foreground"
       )}
     >
-      <Icon className="size-4 shrink-0" aria-hidden="true" />
-      {item.label}
+      <span className="flex items-center gap-2.5">
+        <Icon className="size-4 shrink-0" aria-hidden="true" />
+        {item.label}
+      </span>
+      {!!item.badge && (
+        <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-xs tabular-nums text-chrome-muted">
+          {item.badge}
+        </span>
+      )}
     </Link>
   );
 }
@@ -56,6 +60,15 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const session = useSession();
   const logout = useLogout();
   const isAdmin = session?.scope === "staff" && session.role === "ADMIN";
+
+  const tickets = useTickets(undefined);
+  const articles = useKnowledgeArticles({ limit: 200 });
+
+  const mainItems: NavItem[] = [
+    { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/tickets", label: "Tickets", icon: Inbox, badge: tickets.data?.length },
+    { href: "/knowledge-base", label: "Knowledge Base", icon: BookOpen, badge: articles.data?.length },
+  ];
 
   return (
     <div className="flex h-full flex-col bg-chrome text-chrome-foreground">
@@ -66,10 +79,10 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav className="flex-1 space-y-4 overflow-y-auto px-3 py-4" aria-label="Primary">
         <div>
           <p className="px-2.5 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-chrome-muted">
-            Workspace
+            Navigation
           </p>
           <div className="space-y-0.5">
-            {MAIN_ITEMS.map((item) => (
+            {mainItems.map((item) => (
               <NavLink key={item.href} item={item} onNavigate={onNavigate} />
             ))}
           </div>
@@ -78,7 +91,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         {isAdmin && (
           <div>
             <p className="px-2.5 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-chrome-muted">
-              Admin
+              Management
             </p>
             <div className="space-y-0.5">
               {ADMIN_ITEMS.map((item) => (

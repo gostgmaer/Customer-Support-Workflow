@@ -70,8 +70,14 @@
   --shadow-lg: 0 12px 24px -8px rgb(15 23 42 / 0.12), 0 4px 8px -4px rgb(15 23 42 / 0.06);
 }
 
+/* Dark palette, shared by two triggers: the OS-level preference (default,
+   no explicit user choice yet) and an explicit `data-theme="dark"` set by
+   ThemeToggle (components/layout/ThemeToggle.tsx) and persisted to
+   localStorage. The `:not([data-theme="light"])` guard on the media-query
+   version means an explicit light override always wins over a dark OS
+   preference - the two mechanisms never fight each other. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --background: #0a0a0a;
     --foreground: #fafafa;
     --card: #171717;
@@ -109,6 +115,45 @@
     --destructive: #f87171;
     --destructive-foreground: #450a0a;
   }
+}
+
+:root[data-theme="dark"] {
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --card: #171717;
+  --card-foreground: #fafafa;
+  --popover: #171717;
+  --popover-foreground: #fafafa;
+  --border: #262626;
+  --input: #262626;
+  --ring: #818cf8;
+
+  --primary: #6366f1;
+  --primary-foreground: #ffffff;
+  --primary-hover: #818cf8;
+
+  --secondary: #262626;
+  --secondary-foreground: #fafafa;
+
+  --muted: #262626;
+  --muted-foreground: #a3a3a3;
+
+  --accent: #1e2947;
+  --accent-foreground: #a5b4fc;
+
+  --success: #4ade80;
+  --success-foreground: #052e16;
+  --success-bg: #0d2818;
+
+  --warning: #fbbf24;
+  --warning-foreground: #451a03;
+  --warning-bg: #2e2107;
+
+  --danger: #f87171;
+  --danger-foreground: #450a0a;
+  --danger-bg: #2c1212;
+  --destructive: #f87171;
+  --destructive-foreground: #450a0a;
 }
 
 @theme inline {
