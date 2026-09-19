@@ -169,6 +169,55 @@ async def test_scenario_refund_rejected_by_staff_updates_refund_status(
 
 
 @pytest.mark.asyncio
+async def test_scenario_ticket_decision_pushes_a_live_nudge_to_the_open_conversation(
+    client, auth_token, seeded_customer, staff_token
+):
+    """A staff decision on a paused ticket happens completely outside the
+    customer's own request/response cycle - without a push, the customer's
+    open chat tab would only find out via its 5-second awaiting_approval
+    poll. `app.workflow.runner.resume_workflow` broadcasts a best-effort
+    nudge through the same process-local `ConnectionManager` the inbound
+    storefront webhook already uses (spec: Phase 10.3) - registering a
+    fake socket directly with the real singleton (rather than opening a
+    real websocket, which `tests/integration/test_support_ws.py` already
+    covers) isolates this test to just the resume-triggers-a-broadcast
+    behavior."""
+    from app.realtime.connections import get_connection_manager
+
+    class _FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    conversation_id = f"conv_{uuid.uuid4().hex[:8]}"
+    first = await _post_message(
+        client, auth_token, conversation_id, "The product arrived damaged. I want my money back."
+    )
+    assert first["status"] == "resolved"
+    second = await _post_message(client, auth_token, conversation_id, "Yes, please confirm the refund.")
+    assert second["status"] == "awaiting_approval"
+
+    manager = get_connection_manager()
+    fake_socket = _FakeWebSocket()
+    await manager.register(conversation_id, fake_socket)
+    try:
+        approve_resp = await client.post(
+            f"/api/v1/support/tickets/{second['ticket_id']}/approve",
+            json={"workflow_run_id": second["workflow_run_id"]},
+            headers=_headers(staff_token),
+        )
+        assert approve_resp.status_code == 200, approve_resp.text
+    finally:
+        manager.unregister(conversation_id, fake_socket)
+
+    assert fake_socket.sent == [
+        {"event": "ticket_decision", "workflow_run_id": second["workflow_run_id"], "approved": True}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_short_confirmation_reply_carries_over_pending_intent(client, auth_token, seeded_customer):
     """A bare 'yes' shares no keywords with the original request, so the
     classifier alone would misroute it as UNKNOWN - previous_intent

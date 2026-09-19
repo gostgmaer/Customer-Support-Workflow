@@ -40,6 +40,7 @@ from app.llm.router import TenantScopedLLMRouter, get_llm_router
 from app.observability.logging import bind_context, get_logger
 from app.observability.tracing import build_run_metadata, build_run_tags
 from app.rag.retriever import Retriever
+from app.realtime.connections import get_connection_manager
 from app.repositories.conversations import ConversationRepository
 from app.repositories.vector_store import get_vector_store
 from app.workflow.deps import WorkflowDeps
@@ -310,6 +311,20 @@ async def resume_workflow(
         ticket.approved_by = approver
         await session.flush()
     await session.commit()
+
+    # Best-effort live nudge (spec: Phase 10.3's push, extended here) - a
+    # ticket decision is exactly the case that push exists for: the
+    # customer isn't the one who triggered this completion (a staff
+    # member did, elsewhere), so without this they'd only find out via
+    # the chat UI's own 5-second awaiting_approval poll. Additive
+    # alongside the new assistant message `send_response` already
+    # persisted during the graph's resumed run - never a replacement for
+    # it, and a customer not currently connected simply doesn't get the
+    # nudge.
+    await get_connection_manager().broadcast(
+        run.conversation_id,
+        {"event": "ticket_decision", "workflow_run_id": run.id, "approved": approved},
+    )
 
     return {
         "workflow_run_id": run.id,

@@ -60,10 +60,13 @@ GET /api/v1/support/ws/conversations/{id}?token=<customer JWT>   (spec: Phase 10
   websocket - a browser WebSocket can't set a custom Authorization
   header, so the JWT travels as a query param instead of the usual
   Bearer header. Server-push only (the client never sends anything the
-  server reads). Pushes a JSON message ({"event", "order_id",
-  "ticket_id"}) whenever a storefront webhook correlates to this
-  conversation while connected - see "Inbound storefront webhooks"
-  below and docs/ARCHITECTURE.md's "Real-time push to an active
+  server reads). Two event sources push a JSON message while connected:
+    - {"event", "order_id", "ticket_id"} - a storefront webhook
+      correlates to this conversation (see "Inbound storefront webhooks"
+      below)
+    - {"event": "ticket_decision", "workflow_run_id", "approved"} - a
+      staff member approves/rejects a paused ticket on this conversation
+  both documented in docs/ARCHITECTURE.md's "Real-time push to an active
   conversation". Closes with 4401 on a missing/invalid/expired token,
   4404 if the conversation doesn't exist or belongs to a different
   customer. Single-API-instance only today - see docs/DEPLOYMENT.md.

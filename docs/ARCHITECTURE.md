@@ -787,6 +787,26 @@ customer-side only, per the original scoping request - no staff-side
 script that signs and sends a real event at a real running instance of
 this app - see `docs/DEPLOYMENT.md`'s "Manual webhook demo."
 
+**A second real-time push source, extending the same mechanism**: a
+staff approval/rejection decision on a paused ticket
+(`app.workflow.runner.resume_workflow`) also broadcasts a best-effort
+nudge (`{"event": "ticket_decision", "workflow_run_id", "approved"}`)
+to the same customer conversation, through the exact same
+`ConnectionManager` singleton. This is the case the original push design
+didn't cover: the customer isn't the one who triggered the completion (a
+staff member did, elsewhere), so without this the only way to find out a
+refund was approved is the chat UI's own 5-second `awaiting_approval`
+poll. The frontend needs no new handling for this - `useConversationSocket`'s
+`onmessage` already invalidates the messages/conversation queries on
+*any* message regardless of its shape, so the existing REST refetch
+picks up both the new assistant message `send_response` persists during
+the resumed graph run and the conversation's updated status. Live-verified
+against the real running Docker stack: a real websocket connection
+(inside the container - Docker Desktop's Windows port-forwarding still
+doesn't support the WS upgrade handshake, the same limitation noted for
+the original push) received the exact `ticket_decision` payload the
+instant a real `POST /tickets/{id}/approve` call resolved.
+
 ## Payment gateway (Stripe) (spec: Phase 9.4)
 
 Before this phase, `app.tools.refunds.create_refund_request`/
