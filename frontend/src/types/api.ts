@@ -167,6 +167,7 @@ export interface KnowledgeArticleDetail {
   helpful_yes_count: number;
   helpful_no_count: number;
   helpful_percent: number | null;
+  created_by: string | null;
   created_at: string;
   updated_at: string;
 }

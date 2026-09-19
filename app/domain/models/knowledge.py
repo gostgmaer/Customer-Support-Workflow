@@ -26,6 +26,11 @@ class KnowledgeDocument(Base, TimestampMixin, TenantScopedMixin):
     view_count: Mapped[int] = mapped_column(Integer, default=0)
     helpful_yes_count: Mapped[int] = mapped_column(Integer, default=0)
     helpful_no_count: Mapped[int] = mapped_column(Integer, default=0)
+    # The staff id that uploaded this via POST /api/v1/knowledge/upload -
+    # null for a document that came from `make seed`'s local markdown
+    # files or a docs-integration sync, neither of which has a human
+    # uploader to attribute (mirrors Integration.created_by's precedent).
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class KnowledgeChunk(Base, TimestampMixin, TenantScopedMixin):

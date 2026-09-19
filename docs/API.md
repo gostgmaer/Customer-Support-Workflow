@@ -299,7 +299,7 @@ same UPDATE so a mere read/vote never looks like a content edit - the
 `onupdate` would otherwise bump it on every view.
 
 **`POST /upload`** is the one write path in this router - it runs a
-manually-uploaded `.md`/`.txt` file (2MB max, UTF-8 text only) through the
+manually-uploaded `.md`/`.txt`/`.pdf`/`.docx` file (10MB max) through the
 exact same chunk/embed/vector-store pipeline `make seed` and a docs
 integration's sync use (`app.rag.ingest.ingest_documents`), so the new
 article is retrievable by the AI in the very next customer message, not a
@@ -308,6 +308,23 @@ creates a new document (its `source` is always a fresh
 `upload:<uuid>:<filename>`) rather than trying to detect "is this an
 update to an existing article" - that dedupe/version-bump behavior belongs
 to automated docs-integration syncs, not a one-off manual upload.
+`ArticleDetail.created_by` is set to the uploading admin's staff id -
+`null` for anything ingested via `make seed` or a docs-integration sync,
+neither of which has a human uploader to attribute.
+
+Text extraction (`app.rag.file_extractors`) is format-specific: `.md`/`.txt`
+are decoded as UTF-8 directly; `.pdf` uses `pypdf` (page-by-page
+`extract_text()`, joined - encrypted PDFs and scanned images with no text
+layer are rejected with a clear `VALIDATION_ERROR`, not silently ingested
+as empty); `.docx` uses `python-docx` (paragraphs, with `Heading N`
+styles converted to markdown `#` prefixes, and tables rendered as real
+GFM pipe tables - header row, `---` separator, data rows - so structure
+survives into the article body as genuine markdown, not flattened text).
+The frontend renders `raw_text` as markdown (`ArticleDetail.tsx`); list/
+card previews (`summary`) strip the markdown syntax back out first so a
+heading or table doesn't show literal `#`/`|` characters in a short
+preview. Both libraries are pure-Python - no system
+binary like poppler or LibreOffice is required in the Docker image.
 
 **`POST /ask`** is the only route in this router (and one of very few in
 the whole API) deliberately open to *either* a customer or a staff token -

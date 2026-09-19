@@ -33,7 +33,7 @@ export function UploadArticleDialog({ open, onClose }: { open: boolean; onClose:
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!file) {
-      setFieldError("Choose a .md or .txt file to upload");
+      setFieldError("Choose a file to upload");
       return;
     }
     setFieldError(undefined);
@@ -45,7 +45,7 @@ export function UploadArticleDialog({ open, onClose }: { open: boolean; onClose:
       open={open}
       onClose={close}
       title="Add a knowledge base article"
-      description="Uploads a .md or .txt file into the same pipeline the AI retrieves from during chat."
+      description="Uploads a Markdown, text, PDF, or Word file into the same pipeline the AI retrieves from during chat."
     >
       <form onSubmit={onSubmit} className="space-y-4" noValidate>
         {upload.isError && <Alert variant="error">{getErrorMessage(upload.error)}</Alert>}
@@ -77,14 +77,15 @@ export function UploadArticleDialog({ open, onClose }: { open: boolean; onClose:
         </div>
 
         <div>
-          <Label htmlFor="kb-file">File (.md or .txt)</Label>
+          <Label htmlFor="kb-file">File (.md, .txt, .pdf, or .docx - max 10MB)</Label>
           <input
             id="kb-file"
             type="file"
-            accept=".md,.markdown,.txt,text/markdown,text/plain"
+            accept=".md,.markdown,.txt,.pdf,.docx,text/markdown,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             className="block w-full text-sm text-foreground file:mr-3 file:rounded-md file:border-0 file:bg-secondary file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-secondary-foreground hover:file:bg-muted"
           />
+          {file && <p className="mt-1.5 text-xs text-muted-foreground">{file.name}</p>}
           <FieldError>{fieldError}</FieldError>
         </div>
 

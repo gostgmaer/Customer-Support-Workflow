@@ -5,9 +5,13 @@ KB) - GET /api/v1/knowledge/categories, /articles, /articles/{id},
 
 from __future__ import annotations
 
+import io
 from datetime import UTC, datetime
 
 import pytest
+from docx import Document
+from pypdf import PdfWriter
+from reportlab.pdfgen import canvas
 
 from app.db.base import DEFAULT_TENANT_ID
 from app.domain.models import KnowledgeDocument
@@ -196,7 +200,7 @@ async def test_upload_rejects_unsupported_file_type(client, admin_staff_token):
 
 @pytest.mark.asyncio
 async def test_upload_rejects_oversized_file(client, admin_staff_token):
-    oversized = b"x" * (2 * 1024 * 1024 + 1)
+    oversized = b"x" * (10 * 1024 * 1024 + 1)
     files = {"file": ("policy.txt", oversized, "text/plain")}
     data = {"title": "Too Big", "category": "returns"}
     response = await client.post(
@@ -316,3 +320,103 @@ async def test_ask_rejects_blank_question(client, staff_token):
     )
     assert response.status_code == 400
     assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_upload_extracts_and_ingests_a_real_pdf(client, admin_staff_token):
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    c.drawString(72, 720, "Return Policy")
+    c.drawString(72, 700, "Customers may return an item within 30 days of purchase.")
+    c.save()
+
+    files = {"file": ("return_policy.pdf", buf.getvalue(), "application/pdf")}
+    data = {"title": "Return Policy", "category": "returns"}
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+    response = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert "return an item within 30 days" in body["raw_text"]
+
+    ask = await client.post(
+        "/api/v1/knowledge/ask",
+        json={"question": "How many days do I have to return an item?"},
+        headers=headers,
+    )
+    assert ask.json()["grounded"] is True
+    assert any(s["title"] == "Return Policy" for s in ask.json()["sources"])
+
+
+@pytest.mark.asyncio
+async def test_upload_extracts_and_ingests_a_real_docx(client, admin_staff_token):
+    document = Document()
+    document.add_heading("Shipping Policy", level=1)
+    document.add_paragraph("Standard shipping takes 5 to 7 business days to arrive.")
+    buf = io.BytesIO()
+    document.save(buf)
+
+    files = {
+        "file": (
+            "shipping_policy.docx",
+            buf.getvalue(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    }
+    data = {"title": "Shipping Policy", "category": "shipping"}
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+    response = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert "# Shipping Policy" in body["raw_text"]
+    assert "5 to 7 business days" in body["raw_text"]
+
+    # The full article keeps real markdown (rendered client-side), but the
+    # list/card preview must not leak raw "#"/"|" syntax to the reader.
+    listed = await client.get("/api/v1/knowledge/articles?category=shipping", headers=headers)
+    summary = next(a for a in listed.json() if a["title"] == "Shipping Policy")["summary"]
+    assert "#" not in summary
+    assert "|" not in summary
+    assert "Shipping Policy" in summary
+    assert "5 to 7 business days" in summary
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_encrypted_pdf(client, admin_staff_token):
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.encrypt("secret")
+    buf = io.BytesIO()
+    writer.write(buf)
+
+    files = {"file": ("policy.pdf", buf.getvalue(), "application/pdf")}
+    data = {"title": "Policy", "category": "general"}
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+    response = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert "Encrypted" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_upload_records_who_uploaded_it_but_seeded_articles_have_no_uploader(
+    client, admin_staff_token, seeded_admin, db_session
+):
+    files = {"file": ("policy.txt", b"Some policy content.", "text/plain")}
+    data = {"title": "Some Policy", "category": "general"}
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+    uploaded = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+    assert uploaded.json()["created_by"] == seeded_admin["staff_id"]
+
+    # A document that came from make seed/a docs-integration sync has no
+    # human uploader to attribute - created_by stays null, not a
+    # fabricated "system" placeholder.
+    seeded = await _make_article(db_session, title="Seeded Policy", category="general")
+    detail = await client.get(f"/api/v1/knowledge/articles/{seeded.id}", headers=headers)
+    assert detail.json()["created_by"] is None

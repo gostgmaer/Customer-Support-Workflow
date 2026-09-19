@@ -52,6 +52,12 @@ dependencies = [
     "opentelemetry-sdk>=1.27.0",
     "mcp>=2.0,<3",
     "jsonschema>=4.0",
+    # Knowledge-base upload (spec: help-desk-kit-style KB) - .pdf/.docx
+    # text extraction alongside the existing .md/.txt path. Both are
+    # pure-Python (no system binary like poppler/libreoffice needed),
+    # matching this project's existing "no new system dependency" bar.
+    "pypdf>=5.0.0",
+    "python-docx>=1.1.0",
 ]
 
 [project.optional-dependencies]
@@ -63,6 +69,10 @@ dev = [
     "mypy>=1.13.0",
     "locust>=2.32.0",
     "respx>=0.21.0",
+    # Test-only: generates real text-bearing PDFs to exercise the
+    # pdf-upload path end to end (pypdf itself can read/transform PDFs
+    # but has no API for writing new text content).
+    "reportlab>=4.0.0",
 ]
 
 [build-system]

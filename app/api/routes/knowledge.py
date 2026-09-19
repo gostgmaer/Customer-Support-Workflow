@@ -15,6 +15,7 @@ disconnected copy.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from app.db.session import get_db
 from app.domain.exceptions import ValidationError
 from app.domain.models import KnowledgeDocument
 from app.llm.router import TenantScopedLLMRouter, get_llm_router
+from app.rag.file_extractors import SUPPORTED_UPLOAD_EXTENSIONS, FileExtractionError, extract_text
 from app.rag.ingest import ingest_documents
 from app.rag.loaders import LoadedDocument, clean_text
 from app.rag.retriever import Retriever
@@ -56,14 +58,34 @@ _NOT_FOUND_ANSWER = (
 
 _SUMMARY_LENGTH = 180
 # A support-doc upload (policy pages, FAQs) has no business being large;
-# capping this keeps a mistaken upload (e.g. a PDF renamed to .txt) from
-# producing a multi-thousand-chunk embedding job.
-_MAX_UPLOAD_BYTES = 2 * 1024 * 1024
-_ALLOWED_EXTENSIONS = (".md", ".markdown", ".txt")
+# capping this keeps a mistaken upload (e.g. a scanned-image PDF) from
+# producing a multi-thousand-chunk embedding job. Bigger than the old
+# text-only limit since real policy PDFs/docx files run heavier than
+# equivalent plain text - still bounded, not unlimited.
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+_ALLOWED_EXTENSIONS = SUPPORTED_UPLOAD_EXTENSIONS
+
+
+# A .docx upload's extracted text is real markdown (app.rag.file_extractors -
+# heading "#" prefixes, GFM pipe tables) - the card/list previews strip
+# that syntax rather than showing "# Return Policy | Item | Window" as
+# literal characters. The full article view (ArticleDetail.tsx, frontend)
+# still renders `raw_text` as actual markdown - only this short preview
+# needs plain text.
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,9}\s*", flags=re.MULTILINE)
+_MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$", flags=re.MULTILINE)
+_MARKDOWN_EMPHASIS_RE = re.compile(r"(\*\*|__|\*|_)")
+
+
+def _strip_markdown_for_preview(text: str) -> str:
+    text = _MARKDOWN_TABLE_SEPARATOR_RE.sub(" ", text)
+    text = _MARKDOWN_HEADING_RE.sub("", text)
+    text = _MARKDOWN_EMPHASIS_RE.sub("", text)
+    return text.replace("|", " ")
 
 
 def _summary(document: KnowledgeDocument) -> str:
-    text = " ".join(document.raw_text.split())
+    text = " ".join(_strip_markdown_for_preview(document.raw_text).split())
     if len(text) <= _SUMMARY_LENGTH:
         return text
     return text[:_SUMMARY_LENGTH].rsplit(" ", 1)[0] + "..."
@@ -93,6 +115,7 @@ def _to_detail(document: KnowledgeDocument) -> dict:
         "helpful_yes_count": document.helpful_yes_count,
         "helpful_no_count": document.helpful_no_count,
         "helpful_percent": KnowledgeDocumentRepository.helpful_percent(document),
+        "created_by": document.created_by,
         "created_at": document.created_at.isoformat(),
         "updated_at": document.updated_at.isoformat(),
     }
@@ -181,17 +204,18 @@ async def upload_knowledge_document(
     session: AsyncSession = Depends(get_db),
     admin: tuple[str, str, str] = RequireAdmin,
 ) -> dict:
-    """Ingests an uploaded `.md`/`.txt` file into the real RAG pipeline
-    (chunked, embedded, and upserted into the tenant's vector-store
-    namespace) so it is retrievable by the AI in the very next customer
-    message, not just readable here. Every upload creates a new, distinct
-    document (a unique `source` per call) rather than trying to detect
+    """Ingests an uploaded `.md`/`.txt`/`.pdf`/`.docx` file (text extracted
+    via app.rag.file_extractors) into the real RAG pipeline (chunked,
+    embedded, and upserted into the tenant's vector-store namespace) so it
+    is retrievable by the AI in the very next customer message, not just
+    readable here. Every upload creates a new, distinct document (a
+    unique `source` per call) rather than trying to detect
     "is this an update to an existing article" - that dedupe/version-bump
     semantics exists for automated docs-integration syncs
     (app.rag.docs_ingest), not a one-off manual upload where an admin
     doing it again is a deliberate new document, not an accidental repeat.
     """
-    _admin_id, _role, tenant_id = admin
+    admin_id, _role, tenant_id = admin
 
     filename = file.filename or "upload.txt"
     if not filename.lower().endswith(_ALLOWED_EXTENSIONS):
@@ -206,9 +230,9 @@ async def upload_knowledge_document(
         raise ValidationError("Uploaded file is empty")
 
     try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValidationError("File must be UTF-8 encoded text") from exc
+        text = extract_text(filename, raw)
+    except FileExtractionError as exc:
+        raise ValidationError(str(exc)) from exc
 
     title = title.strip()
     category = category.strip()
@@ -237,6 +261,11 @@ async def upload_knowledge_document(
         # dedupe can't have skipped it - fail loudly rather than return a
         # fabricated response if this is ever somehow unreachable.
         raise ValidationError("Upload succeeded but the new article could not be re-read")
+    # ingest_documents is shared with make seed/docs-integration sync,
+    # neither of which has a human uploader - set separately here rather
+    # than threading an optional uploader id through that shared pipeline.
+    stored.created_by = admin_id
+    await session.commit()
     return _to_detail(stored)
 
 

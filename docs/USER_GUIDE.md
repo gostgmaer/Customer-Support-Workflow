@@ -107,13 +107,17 @@ quickly checking what the AI would say before it comes up in a real
 conversation.
 
 **Adding an article (ADMIN only)**: click **Add article** and upload a
-`.md` or `.txt` file with a title and category. It's ingested into the
-exact same pipeline `make seed` uses - chunked, embedded, and stored - so
-it's immediately both browsable here *and* something the AI can pull from
-the next time a customer asks a matching question in chat (e.g. uploading
-a return policy means the AI can now answer "what's your return policy?"
-by citing it). There's no in-place editor yet: to change an existing
-article's content, edit the source files under `scripts/seed/knowledge/`
+`.md`, `.txt`, `.pdf`, or Word (`.docx`) file (10MB max) with a title and
+category - text is extracted automatically, including headings and
+tables from a Word document. It's ingested into the exact same pipeline
+`make seed` uses - chunked, embedded, and stored - so it's immediately
+both browsable here *and* something the AI can pull from the next time a
+customer asks a matching question in chat (e.g. uploading a return policy
+means the AI can now answer "what's your return policy?" by citing it). A
+scanned PDF with no real text layer, an encrypted PDF, or a non-UTF-8 text
+file will be rejected with a clear error rather than silently ingested
+empty. There's no in-place editor yet: to change an existing article's
+content, edit the source files under `scripts/seed/knowledge/`
 and re-run `make seed`, or re-sync a connected docs integration - a direct
 upload always creates a new article rather than replacing one.
 
