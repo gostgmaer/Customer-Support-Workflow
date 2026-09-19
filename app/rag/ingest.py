@@ -11,10 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import DEFAULT_TENANT_ID, new_uuid
 from app.domain.models import KnowledgeChunk, KnowledgeDocument
+from app.observability.logging import get_logger
 from app.rag.chunking import build_chunks
 from app.rag.embeddings import Embedder, get_embedder
 from app.rag.loaders import LoadedDocument, load_knowledge_directory
 from app.repositories.vector_store import VectorRepository, get_vector_store
+
+logger = get_logger(__name__)
 
 
 def knowledge_namespace(tenant_id: str) -> str:
@@ -68,16 +71,18 @@ async def ingest_documents(
         if existing is not None and not (update_on_version_change and existing.version != doc.version):
             continue
 
+        old_chunks: list[KnowledgeChunk] = []
         if existing is not None:
-            # Version changed since the last sync - replace this
-            # document's chunks rather than leaving stale ones alongside
-            # fresh ones, or silently skipping the update.
+            # Version changed since the last sync - diff chunks by
+            # content_hash (spec: Phase 11 Tier 2.3) rather than always
+            # wiping and rebuilding every chunk: a chunk whose text is
+            # unchanged is left alone (no re-embed), only chunks whose
+            # hash no longer appears in the fresh set are deleted below,
+            # after the new chunk set is known.
             old_chunks_result = await session.execute(
                 select(KnowledgeChunk).where(KnowledgeChunk.document_id == existing.id)
             )
-            for old_chunk in old_chunks_result.scalars().all():
-                await vector_store.delete(namespace=knowledge_namespace(tenant_id), chunk_id=old_chunk.id)
-                await session.delete(old_chunk)
+            old_chunks = list(old_chunks_result.scalars().all())
             existing.version = doc.version
             existing.raw_text = doc.text
             existing.effective_date = doc.effective_date
@@ -109,8 +114,33 @@ async def ingest_documents(
         # what order the rest of the session flushes in.
         await session.flush()
         chunks = build_chunks(doc, document_id=document_id)
-        embeddings = await embedder.embed_batch([c.text for c in chunks])
-        for chunk, embedding in zip(chunks, embeddings, strict=True):
+        new_hashes = {chunk.metadata["content_hash"] for chunk in chunks}
+
+        # A null/legacy hash is never in new_hashes, so a pre-Tier-2.3 row
+        # is always treated as "not present, must be replaced" rather than
+        # assumed unchanged - see the column's own migration note.
+        retained_hashes: set[str] = set()
+        for old_chunk in old_chunks:
+            content_hash = old_chunk.content_hash
+            if content_hash is not None and content_hash in new_hashes:
+                retained_hashes.add(content_hash)
+            else:
+                await vector_store.delete(namespace=knowledge_namespace(tenant_id), chunk_id=old_chunk.id)
+                await session.delete(old_chunk)
+        if old_chunks:
+            await session.flush()
+
+        chunks_to_embed = [c for c in chunks if c.metadata["content_hash"] not in retained_hashes]
+        if retained_hashes:
+            logger.info(
+                "ingest_dedup_skipped_unchanged_chunks",
+                document_id=document_id,
+                skipped=len(chunks) - len(chunks_to_embed),
+                total=len(chunks),
+            )
+
+        embeddings = await embedder.embed_batch([c.text for c in chunks_to_embed])
+        for chunk, embedding in zip(chunks_to_embed, embeddings, strict=True):
             chunk_id = new_uuid()
             session.add(
                 KnowledgeChunk(
@@ -119,6 +149,7 @@ async def ingest_documents(
                     document_id=document_id,
                     chunk_index=chunk.chunk_index,
                     text=chunk.text,
+                    content_hash=chunk.metadata["content_hash"],
                     metadata_json=chunk.metadata,
                 )
             )
@@ -126,7 +157,13 @@ async def ingest_documents(
                 namespace=knowledge_namespace(tenant_id),
                 chunk_id=chunk_id,
                 embedding=embedding,
-                metadata={**chunk.metadata, "text": chunk.text, "chunk_id": chunk_id},
+                metadata={
+                    **chunk.metadata,
+                    "text": chunk.text,
+                    "chunk_id": chunk_id,
+                    "embedding_model": embedder.model,
+                    "embedding_version": embedder.embedding_version,
+                },
             )
             chunk_count += 1
     await session.commit()
@@ -192,6 +229,8 @@ async def warm_vector_index_from_db(
             "expiration_date": document.expiration_date.isoformat() if document.expiration_date else None,
             "text": chunk.text,
             "chunk_id": chunk.id,
+            "embedding_model": embedder.model,
+            "embedding_version": embedder.embedding_version,
         }
         await vector_store.upsert(
             namespace=knowledge_namespace(chunk.tenant_id),

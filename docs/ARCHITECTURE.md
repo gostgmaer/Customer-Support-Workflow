@@ -225,38 +225,125 @@ now permanent regression cases in `tests/evaluation/dataset.py::EVAL_CASES`
 whenever a real production failure is diagnosed" - for three phases
 running before it actually happened).
 
-## RAG pipeline (spec §8-9)
+## RAG pipeline (spec §8-9; retrieval upgrade: Phase 11)
 
 ```
 scripts/seed/knowledge/*.md (YAML frontmatter + body)
         v  app.rag.loaders.load_knowledge_directory
 LoadedDocument (title, category, version, effective/expiration dates, text)
-        v  app.rag.chunking.build_chunks
-DocumentChunk[] (paragraph-packed, ~800 chars, carries doc metadata)
-        v  app.rag.embeddings.HashingEmbedder.embed_batch
-embeddings (feature-hashed bag-of-words, numpy)
+        v  app.rag.chunking.build_chunks (LangChain: heading-aware + size-bounded)
+DocumentChunk[] (section_path, content_hash, token_count, chunking_version)
+        v  app.rag.embeddings.get_embedder().embed_batch
+embeddings (LangChainEmbedder/gemini-embedding-2, or HashingEmbedder fallback)
         v  app.repositories.vector_store (upsert)
 KnowledgeDocument/KnowledgeChunk rows (DB, source of truth)
-  + vector store entries (search index)
+  + vector store entries (search index: real pgvector column + HNSW,
+    or in-memory numpy, per VECTOR_BACKEND)
 ```
 
-At query time, `app.rag.retriever.Retriever.retrieve`:
+**Embeddings** (`app.rag.embeddings.get_embedder`): a real semantic model
+(`LangChainEmbedder`, wrapping `langchain_google_genai.GoogleGenerativeAIEmbeddings`,
+`EMBEDDING_MODEL` default `models/gemini-embedding-2`, truncated to
+`VECTOR_DIMENSIONS` via the model's own Matryoshka output-dimensionality
+support - verified against the real Google API, not assumed) is used
+whenever `MOCK_LLM=false` and `GOOGLE_API_KEY` is set. Otherwise
+`HashingEmbedder` (deterministic feature-hashing bag-of-words, purely
+lexical token-overlap - **not semantic**) is the zero-setup/offline
+fallback, matching how a real vs. mock LLM provider is already selected
+elsewhere. Real embeddings are a different vector space than hash-based
+ones - switching requires re-embedding the existing corpus once via
+`scripts/rag/reembed_all.py` (pgvector backend only; the in-memory
+backend just needs an API restart, since its startup warm-up already
+re-embeds with whatever embedder is currently configured).
 
-1. Embeds the query, searches the vector store (over-fetches `top_k * 3`).
-2. **Filters out expired documents** (`expiration_date` in the past) before
-   any scoring happens - an expired policy can never outrank a current one
-   because it is never scored at all (spec §8: "never allow expired
-   policies to override current policies").
-3. Reranks survivors with `app.rag.reranker.rerank`, which blends vector
-   similarity with lexical (keyword) overlap - weighted toward lexical by
-   default, because `HashingEmbedder`'s cosine similarities are coarse
-   (typically 0.05-0.4 even for a good match). `CONFIDENCE_RETRIEVAL`
-   (default `0.30`) is calibrated for this combination; raise it if you
-   swap in a real embeddings API/model.
-4. Deduplicates near-identical chunks and returns the top `k`. An empty
+**Chunking** (`app.rag.chunking.build_chunks`): `MarkdownHeaderTextSplitter`
+splits on `#`/`##`/`###` headings first (keeping a GFM table/list intact
+within its section), then `RecursiveCharacterTextSplitter` further splits
+any section still over `CHUNK_SIZE` (default 800 chars, `CHUNK_OVERLAP`
+default 120 - character-based, not token-based: `tiktoken` is not a real
+dependency of this project, so `token_count` in chunk metadata is an
+approximation, chars/4). Each chunk's metadata carries `section_path`
+(the heading trail), `content_hash` (blake2b of the chunk text - used
+for ingest-time dedup, see below), `token_count`, and `chunking_version`.
+
+**Vector storage** (`app.repositories.vector_store`): `VECTOR_BACKEND=memory`
+(default) is a process-local numpy brute-force cosine store, fine for a
+small per-tenant corpus. `VECTOR_BACKEND=pgvector` uses a real `vector`
+column with an HNSW index (`ORDER BY embedding_vec <=> :query LIMIT
+:top_k`, migrations 0013-0014) - previously this backend stored
+embeddings as plain JSON and scored every row in the namespace in
+Python with no LIMIT at all, a real O(n) brute-force scan despite the
+`pgvector/pgvector:pg16` image already shipping the extension unused.
+
+**Hybrid retrieval** (`app.rag.retriever.Retriever.retrieve`):
+
+1. Embeds the query, then runs a **vector search and an independent
+   keyword search in parallel** - `VectorRepository.search` (semantic)
+   and `.search_keyword` (full-text: `ts_rank`/`plainto_tsquery` over a
+   generated `tsvector` column for pgvector, `app.rag.reranker.lexical_overlap`
+   over the in-memory backend's small candidate set). A document the
+   embedding step fails to surface can still be recovered by an exact
+   keyword match - previously impossible, since reranking only ever
+   rescored what vector search already found.
+2. Fuses the two candidate lists via **Reciprocal Rank Fusion**
+   (`app.rag.reranker.reciprocal_rank_fusion`, `k=60`, the standard
+   default) - this only decides *which* chunks matter and their relative
+   order. Each candidate's score used downstream is its real vector
+   cosine similarity when vector search found it, or `0.0` when it was
+   recovered by keyword search alone (RRF's own fused score lives on an
+   incompatible scale for the confidence threshold below - feeding it in
+   directly was tried and confirmed, live, to silently collapse every
+   combined score under threshold).
+3. **Filters out expired documents** (`expiration_date` in the past)
+   before any further scoring - an expired policy can never outrank a
+   current one because it is never scored at all (spec §8).
+4. Reranks survivors with `app.rag.reranker.rerank`, blending the
+   vector/zero score above with lexical overlap. The blend weight is no
+   longer a single constant: `HashingEmbedder` keeps `rerank()`'s own
+   lexical-dominant `0.35` default (its cosine scores are too coarse to
+   trust further), but a real embedder uses `RERANK_SEMANTIC_VECTOR_WEIGHT`
+   (default `0.85`) instead. **This was a real bug caught by live
+   testing, not a design choice made upfront**: with real
+   `gemini-embedding-2` vectors active, the query "How many days can I
+   return an item within of purchase?" correctly scored Refund Policy
+   highest on cosine similarity alone (0.745 vs Shipping Policy's 0.675)
+   - but Shipping Policy's text happens to share several literal words
+   with the query ("days", "within", "purchase"), giving it more than
+   double the lexical-overlap score. At the old `0.35` weight this
+   lexical false-positive won outright; the weight needs to exceed
+   ~0.84 before the genuinely-stronger semantic match wins. `CONFIDENCE_RETRIEVAL`
+   (default `0.30`) still needs re-tuning against real query/answer
+   quality once real embeddings are live in a given deployment.
+5. Deduplicates near-identical chunks and returns the top `k`. An empty
    result is a real signal, not a bug: `app.agents.resolution.resolve_from_knowledge`
    turns "no documents found" into an escalation instead of asking the LLM
    to answer from nothing (spec §9, §34 scenario 4).
+
+**Ingest-time dedup** (`app.rag.ingest.ingest_documents`, spec: Phase 11
+Tier 2.3): a document re-synced with a bumped `version` (external doc
+sources only - local markdown files are hand-versioned and skip
+entirely on a repeat ingest) is now diffed by `content_hash` rather than
+having every chunk wiped and rebuilt: a chunk whose text is byte-identical
+to what's already stored is left alone (no re-embed call), only chunks
+whose hash no longer appears are deleted, and only genuinely new/changed
+chunks are embedded. A version bump that only changed page metadata
+(not content) now reports `chunks_ingested: 0` - a real, measurable
+cost saving on re-sync, not just a theoretical one.
+
+**Observability**: per-stage Prometheus histograms
+(`EMBEDDING_LATENCY`, `VECTOR_SEARCH_LATENCY`, `KEYWORD_SEARCH_LATENCY`,
+`RERANK_LATENCY`, alongside the existing `RETRIEVAL_LATENCY`) plus one
+structured `rag_retrieval` log per request (candidate counts at each
+stage, never full chunk content) - previously only one combined latency
+histogram and a hit/miss counter existed for the entire pipeline.
+
+**Evaluation**: no Recall@K/MRR/NDCG numbers are reported for this
+upgrade - there is no existing labeled retrieval-evaluation dataset in
+this codebase, and fabricating query/expected-chunk pairs to produce
+before/after numbers would misrepresent measurement that didn't happen.
+See `docs/EVALUATION.md` for what was actually measured (a live,
+reproducible query/answer comparison) and what is explicitly marked
+`NOT MEASURED`.
 
 ### Why an in-memory vector store needs a startup step
 

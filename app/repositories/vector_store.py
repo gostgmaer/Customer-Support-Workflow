@@ -5,15 +5,27 @@ implementations are provided, selected by `VECTOR_BACKEND`:
 
 - `InMemoryVectorStore` (default): numpy cosine similarity, process-local.
   Zero setup, fine for the curated seed corpus and for tests.
-- `PgVectorStore`: persists embeddings as JSON float arrays in Postgres and
-  scores in Python after a metadata-filtered fetch. This avoids requiring
-  the postgres `vector` extension to be installed for this build; swap the
-  storage/query in this class for a real `vector` column + `<->` operator
-  (via the `pgvector` package) for large-corpus production use without
-  touching the retriever - the interface does not change.
+- `PgVectorStore`: real pgvector-backed storage (spec: Phase 11 RAG
+  retrieval upgrade) - a genuine `vector` column with an HNSW index
+  (`ORDER BY embedding_vec <=> :query LIMIT :top_k`, see migration 0013),
+  not the brute-force Python-side cosine scan this class used before.
+  Also supports `search_keyword` (full-text search via a generated
+  `tsvector` column + GIN index, migration 0014) for hybrid retrieval -
+  see app.rag.retriever's RRF fusion of the two.
 
 Both implementations support metadata filtering, namespace isolation,
-upsert, and delete, per spec.
+upsert, and delete, per spec. `search_keyword` on `InMemoryVectorStore`
+reuses `app.rag.reranker.lexical_overlap` as an equivalent in-process
+scorer, since that backend's linear scan is already its documented
+design for a small corpus.
+
+Postgres-only behavior in this module (the real `vector`/`tsvector`
+columns) has no automated pytest coverage, matching this codebase's own
+established precedent for anything that needs a real Postgres instance
+(see app.workflow.runner's checkpointer backend selection / Phase 9.1) -
+the entire test suite runs against SQLite via `InMemoryVectorStore`
+only; `PgVectorStore`'s real-Postgres behavior is verified manually
+against the docker-compose Postgres service.
 """
 
 from __future__ import annotations
@@ -22,8 +34,13 @@ import json
 from typing import Protocol
 
 import numpy as np
+from pgvector import Vector
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Deferred import (see InMemoryVectorStore.search_keyword) - app.rag.reranker
+# imports VectorMatch from this module, so a top-level import here would be
+# circular.
 
 
 class VectorMatch:
@@ -45,6 +62,15 @@ class VectorRepository(Protocol):
         *,
         namespace: str,
         query_embedding: list[float],
+        top_k: int = 5,
+        metadata_filter: dict | None = None,
+    ) -> list[VectorMatch]: ...
+
+    async def search_keyword(
+        self,
+        *,
+        namespace: str,
+        query: str,
         top_k: int = 5,
         metadata_filter: dict | None = None,
     ) -> list[VectorMatch]: ...
@@ -99,19 +125,51 @@ class InMemoryVectorStore:
         scored.sort(key=lambda m: m.score, reverse=True)
         return scored[:top_k]
 
+    async def search_keyword(
+        self,
+        *,
+        namespace: str,
+        query: str,
+        top_k: int = 5,
+        metadata_filter: dict | None = None,
+    ) -> list[VectorMatch]:
+        from app.rag.reranker import lexical_overlap
+
+        candidates = self._store.get(namespace, {})
+        scored = [
+            VectorMatch(chunk_id, lexical_overlap(query, meta.get("text", "")), meta)
+            for chunk_id, (_vec, meta) in candidates.items()
+            if _matches_filter(meta, metadata_filter)
+        ]
+        scored = [m for m in scored if m.score > 0.0]
+        scored.sort(key=lambda m: m.score, reverse=True)
+        return scored[:top_k]
+
+
+def _to_metadata_dict(value: dict | str) -> dict:
+    return value if isinstance(value, dict) else json.loads(value)
+
 
 class PgVectorStore:
-    """Postgres-backed store. Requires the `vector_embeddings` table
+    """Postgres-backed store, using a real `vector` column with an HNSW
+    index (spec: Phase 11 RAG retrieval upgrade - see migrations 0002,
+    0013, 0014 for the table's full history). Requires:
 
         CREATE TABLE vector_embeddings (
             namespace TEXT NOT NULL,
             chunk_id TEXT NOT NULL,
-            embedding JSONB NOT NULL,
+            embedding JSON NOT NULL,          -- legacy, kept as a rollback path
             metadata JSONB NOT NULL,
+            embedding_vec vector(768),         -- real pgvector column
+            text_search tsvector GENERATED ALWAYS AS (...) STORED,
             PRIMARY KEY (namespace, chunk_id)
         );
 
-    which is created by migration 0002 (see migrations/versions).
+    `search` orders by `embedding_vec <=> :query` (HNSW-indexed) instead
+    of fetching every row in the namespace and scoring in Python.
+    `search_keyword` runs a real `ts_rank`/`plainto_tsquery` full-text
+    query (GIN-indexed) for the keyword half of hybrid retrieval (see
+    app.rag.retriever's RRF fusion of the two).
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -123,16 +181,19 @@ class PgVectorStore:
         await self._session.execute(
             text(
                 """
-                INSERT INTO vector_embeddings (namespace, chunk_id, embedding, metadata)
-                VALUES (:namespace, :chunk_id, :embedding, :metadata)
+                INSERT INTO vector_embeddings (namespace, chunk_id, embedding, embedding_vec, metadata)
+                VALUES (:namespace, :chunk_id, :embedding, CAST(:embedding_vec AS vector), :metadata)
                 ON CONFLICT (namespace, chunk_id)
-                DO UPDATE SET embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata
+                DO UPDATE SET embedding = EXCLUDED.embedding,
+                              embedding_vec = EXCLUDED.embedding_vec,
+                              metadata = EXCLUDED.metadata
                 """
             ),
             {
                 "namespace": namespace,
                 "chunk_id": chunk_id,
                 "embedding": json.dumps(embedding),
+                "embedding_vec": Vector(embedding).to_text(),
                 "metadata": json.dumps(metadata),
             },
         )
@@ -154,20 +215,60 @@ class PgVectorStore:
         metadata_filter: dict | None = None,
     ) -> list[VectorMatch]:
         rows = await self._session.execute(
-            text("SELECT chunk_id, embedding, metadata FROM vector_embeddings WHERE namespace = :namespace"),
-            {"namespace": namespace},
+            text(
+                """
+                SELECT chunk_id, metadata, 1 - (embedding_vec <=> CAST(:query_vec AS vector)) AS score
+                FROM vector_embeddings
+                WHERE namespace = :namespace
+                  AND embedding_vec IS NOT NULL
+                  AND (CAST(:filter_json AS jsonb) IS NULL OR metadata @> CAST(:filter_json AS jsonb))
+                ORDER BY embedding_vec <=> CAST(:query_vec AS vector)
+                LIMIT :top_k
+                """
+            ),
+            {
+                "namespace": namespace,
+                "query_vec": Vector(query_embedding).to_text(),
+                "filter_json": json.dumps(metadata_filter) if metadata_filter else None,
+                "top_k": top_k,
+            },
         )
-        query = np.array(query_embedding, dtype=float)
-        scored = []
-        for chunk_id, embedding_json, metadata_json in rows.all():
-            metadata = metadata_json if isinstance(metadata_json, dict) else json.loads(metadata_json)
-            if not _matches_filter(metadata, metadata_filter):
-                continue
-            embedding = embedding_json if isinstance(embedding_json, list) else json.loads(embedding_json)
-            score = _cosine(query, np.array(embedding, dtype=float))
-            scored.append(VectorMatch(chunk_id, score, metadata))
-        scored.sort(key=lambda m: m.score, reverse=True)
-        return scored[:top_k]
+        return [
+            VectorMatch(chunk_id, float(score), _to_metadata_dict(metadata))
+            for chunk_id, metadata, score in rows.all()
+        ]
+
+    async def search_keyword(
+        self,
+        *,
+        namespace: str,
+        query: str,
+        top_k: int = 5,
+        metadata_filter: dict | None = None,
+    ) -> list[VectorMatch]:
+        rows = await self._session.execute(
+            text(
+                """
+                SELECT chunk_id, metadata, ts_rank(text_search, plainto_tsquery('english', :query)) AS score
+                FROM vector_embeddings
+                WHERE namespace = :namespace
+                  AND text_search @@ plainto_tsquery('english', :query)
+                  AND (CAST(:filter_json AS jsonb) IS NULL OR metadata @> CAST(:filter_json AS jsonb))
+                ORDER BY score DESC
+                LIMIT :top_k
+                """
+            ),
+            {
+                "namespace": namespace,
+                "query": query,
+                "filter_json": json.dumps(metadata_filter) if metadata_filter else None,
+                "top_k": top_k,
+            },
+        )
+        return [
+            VectorMatch(chunk_id, float(score), _to_metadata_dict(metadata))
+            for chunk_id, metadata, score in rows.all()
+        ]
 
 
 def get_vector_store(session: AsyncSession | None = None) -> VectorRepository:

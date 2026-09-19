@@ -66,6 +66,18 @@ dependencies = [
     # default needs neither.
     "boto3>=1.35.0",
     "azure-storage-blob>=12.23.0",
+    # RAG retrieval upgrade (Phase 11) - `pgvector` is the Python client for
+    # the extension the `pgvector/pgvector:pg16` Postgres image already
+    # ships (previously unused - PgVectorStore stored embeddings as plain
+    # JSON and scored in Python, see migrations/versions/0013). Only
+    # imported by the pgvector-backend code path (VECTOR_BACKEND=pgvector);
+    # the default in-memory backend needs neither.
+    "pgvector>=0.3.0",
+    # LangChain-based structure-aware chunking (MarkdownHeaderTextSplitter +
+    # RecursiveCharacterTextSplitter), replacing the naive blank-line
+    # splitter in app.rag.chunking - not already pulled in transitively by
+    # langchain-core (verified).
+    "langchain-text-splitters>=0.3.0",
 ]
 
 [project.optional-dependencies]

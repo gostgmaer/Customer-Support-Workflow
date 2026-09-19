@@ -27,6 +27,41 @@ def lexical_overlap(query: str, text: str) -> float:
     return len(query_tokens & text_tokens) / len(query_tokens)
 
 
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[VectorMatch]], *, k: int = 60
+) -> list[VectorMatch]:
+    """Fuses multiple independently-ranked candidate lists (e.g. a vector
+    search and a keyword search - see app.rag.retriever) into one ranking
+    via Reciprocal Rank Fusion: `score = sum(1 / (k + rank))` across every
+    list a chunk appears in, `rank` 0-indexed. `k=60` is RRF's standard
+    default (Cormack et al., 2009) - it discounts rank differences deep in
+    a list while still rewarding a chunk that ranks highly in more than
+    one source. A chunk missing from a list simply doesn't contribute a
+    term for it, so a keyword-only or vector-only match is never
+    penalized for the source that didn't find it.
+
+    Each returned `VectorMatch.score` is the RRF score (not a
+    similarity/relevance score of either underlying method) - the caller
+    (`rerank`) treats it as another ranking signal, not a probability or
+    cosine similarity.
+    """
+    fused: dict[str, tuple[VectorMatch, float]] = {}
+    for ranked_list in ranked_lists:
+        for rank, match in enumerate(ranked_list):
+            contribution = 1.0 / (k + rank)
+            if match.chunk_id in fused:
+                existing_match, existing_score = fused[match.chunk_id]
+                fused[match.chunk_id] = (existing_match, existing_score + contribution)
+            else:
+                fused[match.chunk_id] = (match, contribution)
+
+    results = [
+        VectorMatch(match.chunk_id, score, match.metadata) for match, score in fused.values()
+    ]
+    results.sort(key=lambda m: m.score, reverse=True)
+    return results
+
+
 def rerank(
     query: str, matches: list[tuple[VectorMatch, str]], *, vector_weight: float = 0.35
 ) -> list[tuple[VectorMatch, str, float]]:

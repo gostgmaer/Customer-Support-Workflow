@@ -16,21 +16,18 @@ from app.rag.retriever import Retriever
 from app.repositories.vector_store import InMemoryVectorStore
 
 
-def _confluence_page_response(version: int = 1) -> Response:
+def _confluence_page_response(version: int = 1, *, text: str | None = None) -> Response:
+    body = text or (
+        "<p>Customers may request a refund within 30 days of delivery "
+        "under our refund policy.</p>"
+    )
     return Response(
         200,
         json={
             "id": "111",
             "title": "Refund Policy",
             "version": {"number": version},
-            "body": {
-                "storage": {
-                    "value": (
-                        "<p>Customers may request a refund within 30 days of delivery "
-                        "under our refund policy.</p>"
-                    )
-                }
-            },
+            "body": {"storage": {"value": body}},
         },
     )
 
@@ -83,17 +80,40 @@ async def test_second_sync_at_the_same_version_is_a_dedupe_no_op(client, admin_s
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_a_version_bump_re_ingests_the_page(client, admin_staff_token, db_session):
+async def test_a_version_bump_with_changed_text_re_embeds_the_page(client, admin_staff_token, db_session):
     integration_id = await _create_docs_integration(client, admin_staff_token)
     route = respx.get("https://example.atlassian.net/wiki/api/v2/pages/111")
     route.mock(return_value=_confluence_page_response(version=1))
     headers = {"Authorization": f"Bearer {admin_staff_token}"}
     await client.post(f"/api/v1/admin/integrations/{integration_id}/sync", headers=headers)
 
-    route.mock(return_value=_confluence_page_response(version=2))
+    route.mock(
+        return_value=_confluence_page_response(
+            version=2, text="<p>Refunds are now processed within 14 days, not 30.</p>"
+        )
+    )
     second = await client.post(f"/api/v1/admin/integrations/{integration_id}/sync", headers=headers)
 
     assert second.json()["chunks_ingested"] > 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_version_bump_with_unchanged_text_skips_re_embedding(client, admin_staff_token, db_session):
+    """spec: Phase 11 Tier 2.3 - a version bump alone (e.g. a page's
+    metadata/permissions changed in Confluence, not its content) must not
+    re-embed chunks whose text is byte-identical to what's already
+    stored - that's the whole point of content-hash dedup."""
+    integration_id = await _create_docs_integration(client, admin_staff_token)
+    route = respx.get("https://example.atlassian.net/wiki/api/v2/pages/111")
+    route.mock(return_value=_confluence_page_response(version=1))
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+    await client.post(f"/api/v1/admin/integrations/{integration_id}/sync", headers=headers)
+
+    route.mock(return_value=_confluence_page_response(version=2))  # same text, version bumped
+    second = await client.post(f"/api/v1/admin/integrations/{integration_id}/sync", headers=headers)
+
+    assert second.json()["chunks_ingested"] == 0
 
 
 @pytest.mark.asyncio

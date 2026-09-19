@@ -431,6 +431,34 @@ child, or add a proper `relationship()` so SQLAlchemy orders it for you -
 and you'll find out immediately in the test suite now, not after
 deploying to Postgres.
 
+## Cutting over to real embeddings (spec: Phase 11)
+
+Setting `MOCK_LLM=false` + `GOOGLE_API_KEY` makes `app.rag.embeddings.get_embedder`
+automatically switch from `HashingEmbedder` (lexical, deterministic) to a
+real semantic embedder (`gemini-embedding-2` by default) - but this is a
+genuinely different vector space, not a drop-in upgrade of the existing
+one. Any chunk already embedded with the old embedder stays a hash-based
+vector until re-embedded; comparing a real query embedding against a
+stash of hash-based document vectors (or vice versa) produces
+meaningless cosine scores.
+
+- `VECTOR_BACKEND=pgvector` (durable): run
+  `python scripts/rag/reembed_all.py` once, right after flipping
+  `MOCK_LLM`/`GOOGLE_API_KEY`, to re-embed every existing
+  `KnowledgeChunk` in place.
+- `VECTOR_BACKEND=memory` (process-local): nothing to run - just restart
+  the API process. Its own startup warm-up (`app.rag.ingest.warm_vector_index_from_db`,
+  see `app.main`'s `lifespan`) already re-embeds every chunk using
+  whatever embedder is currently configured.
+
+Also re-tune `CONFIDENCE_RETRIEVAL` against real query/answer quality
+once real embeddings are live - its calibration is for the blended
+vector+lexical score `app.rag.reranker.rerank` produces, not a raw
+cosine similarity, but hybrid retrieval changes which candidates reach
+that check. See `docs/ARCHITECTURE.md`'s RAG pipeline section and
+`docs/EVALUATION.md`'s Phase 11 section for what was actually measured
+before calling this cutover verified.
+
 ## Health checks
 
 - `GET /api/v1/health` - liveness (no dependencies checked).

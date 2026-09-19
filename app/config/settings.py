@@ -49,7 +49,38 @@ class Settings(BaseSettings):
 
     # --- Vector store ---
     vector_backend: str = Field(default="memory", alias="VECTOR_BACKEND")  # memory | pgvector
-    vector_dimensions: int = Field(default=384, alias="VECTOR_DIMENSIONS")
+    # 768 matches gemini-embedding-2's Matryoshka-truncated output
+    # (embedding_model below) - the real embedder used whenever MOCK_LLM=false
+    # and GOOGLE_API_KEY is set (app.rag.embeddings.get_embedder). The
+    # HashingEmbedder fallback also honors this dimension for internal
+    # consistency; switching it requires re-embedding the corpus (see
+    # scripts/rag/reembed_all.py) since it's a different vector space.
+    vector_dimensions: int = Field(default=768, alias="VECTOR_DIMENSIONS")
+    embedding_model: str = Field(default="models/gemini-embedding-2", alias="EMBEDDING_MODEL")
+
+    # --- Reranking (spec: Phase 11 - hybrid retrieval) ---
+    # app.rag.reranker.rerank's vector_weight when a real semantic
+    # embedder is active (app.rag.embeddings.get_embedder) rather than
+    # the HashingEmbedder fallback (which keeps rerank()'s own 0.35
+    # default - its cosine scores are too coarse to trust more than
+    # that). Live-verified against the real running app with real
+    # gemini-embedding-2 vectors: a query sharing several literal words
+    # with an unrelated document (e.g. "purchase"/"within"/"days"
+    # appearing in a Shipping Policy for a question actually about
+    # Refund Policy's return window) needs vector_weight > ~0.84 for the
+    # correct document (cosine 0.745) to outrank the lexically-similar
+    # wrong one (cosine 0.675, lexical overlap more than double) - a
+    # real embedding model's cosine score is a far more reliable signal
+    # than this codebase's crude (non-IDF-weighted) token-overlap lexical
+    # score, so it should dominate once it exists at all.
+    rerank_semantic_vector_weight: float = Field(default=0.85, alias="RERANK_SEMANTIC_VECTOR_WEIGHT")
+
+    # --- Chunking (spec: Phase 11 Tier 2 - structure-aware chunking) ---
+    # Character-based, not a real tokenizer (see app.rag.chunking's
+    # docstring for why) - these are the max size/overlap of a chunk
+    # sub-split within one markdown-heading section, not a token budget.
+    chunk_size: int = Field(default=800, alias="CHUNK_SIZE")
+    chunk_overlap: int = Field(default=120, alias="CHUNK_OVERLAP")
 
     # --- LLM (spec §3-5, §44, §48) ---
     # The entire system must be runnable without paid LLM APIs (spec §48).
@@ -104,10 +135,14 @@ class Settings(BaseSettings):
 
     # --- Confidence thresholds ---
     confidence_intent: float = Field(default=0.80, alias="CONFIDENCE_INTENT")
-    # Calibrated for the default HashingEmbedder + lexical-weighted reranker
+    # Calibrated for the HashingEmbedder + lexical-weighted reranker fallback
     # (see app.rag.reranker) - its combined scores run much lower than a
-    # real semantic embedding model's. Raise this if RAG_EMBEDDER is swapped
-    # for a real embeddings API/model.
+    # real semantic embedding model's. When a real embedder is active
+    # (see app.rag.embeddings.get_embedder), retrieval now fuses vector +
+    # keyword candidates via RRF before this threshold is applied (see
+    # app.rag.retriever) - re-tune this value against real query/answer
+    # quality once real embeddings are live in your deployment, don't
+    # assume this default still fits.
     confidence_retrieval: float = Field(default=0.30, alias="CONFIDENCE_RETRIEVAL")
     confidence_response: float = Field(default=0.85, alias="CONFIDENCE_RESPONSE")
 

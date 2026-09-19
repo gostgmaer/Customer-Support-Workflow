@@ -65,6 +65,15 @@ services:
       MICROSOFT_OAUTH_CLIENT_SECRET: ${MICROSOFT_OAUTH_CLIENT_SECRET:-}
       MICROSOFT_OAUTH_TENANT_ID: ${MICROSOFT_OAUTH_TENANT_ID:-common}
       MICROSOFT_OAUTH_REDIRECT_URI: ${MICROSOFT_OAUTH_REDIRECT_URI:-}
+      # spec: Phase 11 - real embeddings/chunking tuning. VECTOR_DIMENSIONS
+      # is deliberately NOT exposed here: migration 0013 hardcodes the
+      # pgvector column as vector(768) to match EMBEDDING_MODEL's default
+      # output size - changing VECTOR_DIMENSIONS without a matching new
+      # migration would silently break every real-embedding upsert/search.
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-models/gemini-embedding-2}
+      CHUNK_SIZE: ${CHUNK_SIZE:-800}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-120}
+      RERANK_SEMANTIC_VECTOR_WEIGHT: ${RERANK_SEMANTIC_VECTOR_WEIGHT:-0.85}
     ports:
       - "8000:8000"
     command: >

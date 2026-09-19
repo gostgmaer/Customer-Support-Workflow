@@ -54,6 +54,61 @@ carryover edge case). These exercise routing, tool authorization, the
 policy/grounding/review gates, and the interrupt/resume mechanism together
 - run them whenever you change `app/workflow/` or `app/agents/`.
 
+## RAG retrieval upgrade evaluation (spec: Phase 11)
+
+The Phase 11 spec explicitly required: "Do not invent results. If
+evaluation data is unavailable, explicitly mark the values as NOT
+MEASURED." There is no existing labeled retrieval-evaluation dataset in
+this codebase (`RETRIEVAL_CASES` below checks *document category*, not
+ranking quality against a graded relevance scale) - so no
+Recall@K/Precision@K/MRR/NDCG numbers are reported here, before or
+after. Fabricating query/expected-chunk pairs to produce plausible-looking
+before/after numbers would misrepresent measurement that didn't happen.
+
+| Metric | Status |
+|---|---|
+| Recall@K | NOT MEASURED |
+| Precision@K | NOT MEASURED |
+| MRR | NOT MEASURED |
+| NDCG | NOT MEASURED |
+| Latency (p50/p95/p99) | NOT MEASURED (per-stage histograms exist as of this phase - `EMBEDDING_LATENCY`, `VECTOR_SEARCH_LATENCY`, `KEYWORD_SEARCH_LATENCY`, `RERANK_LATENCY` in `app.observability.metrics` - but no load test has been run to report percentiles) |
+
+**What was actually measured instead**, matching this project's own
+established practice of live-verifying against the real running stack
+rather than a synthetic benchmark:
+
+- The exact failure mode the spec's own audit reproduced ("How many days
+  can I return an item within of purchase?" ranking Shipping Policy
+  above Refund Policy, with a blended/unfocused generated answer) was
+  re-run against the real running app with real `gemini-embedding-2`
+  embeddings and the real pgvector backend, in a clean tenant namespace
+  isolated from this dev environment's accumulated test data: Refund
+  Policy now ranks first (`0.6741` vs Shipping Policy's `0.6694`).
+- Two further real queries ("What is your refund policy for damaged
+  items?", "How long does shipping take?") were checked in the same
+  session and correctly returned their respective documents first with
+  clear score separation, as a basic non-regression spot-check alongside
+  the primary reproduction case.
+- A real, previously-hidden bug was caught by this same live testing
+  (not by a unit test): `rerank()`'s vector-weight constant, calibrated
+  for `HashingEmbedder`'s coarse cosine scores, silently let a lexically-
+  similar-but-wrong document beat a much stronger real semantic match.
+  Fixed via `RERANK_SEMANTIC_VECTOR_WEIGHT` (see `docs/ARCHITECTURE.md`'s
+  hybrid retrieval section for the full account) and covered by a
+  deterministic regression test (`tests/unit/test_retriever.py`) that
+  reproduces the same conflicting-documents shape without needing a real
+  API call.
+- Real pgvector storage (HNSW-indexed `vector` column) and real hybrid
+  keyword search (`tsvector`/GIN) were confirmed working end-to-end
+  against the actual Postgres service in `docker-compose.yml` - a real
+  ingest, a real `ORDER BY embedding_vec <=> ... LIMIT ...` query, and a
+  real `ts_rank`/`plainto_tsquery` query all ran and returned correct,
+  expected results.
+
+This is evidence that the specific, demonstrated problem is fixed - not
+a claim of overall retrieval-quality improvement at scale, which would
+require the labeled dataset this codebase doesn't have.
+
 ## What this evaluation harness does *not* cover
 
 Retrieval precision/recall and groundedness scoring against a large,

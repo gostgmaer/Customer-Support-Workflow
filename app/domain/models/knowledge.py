@@ -58,3 +58,10 @@ class KnowledgeChunk(Base, TimestampMixin, TenantScopedMixin):
     chunk_index: Mapped[int] = mapped_column()
     text: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Content-hash dedup (spec: Phase 11 Tier 2.3) - lets a re-sync of an
+    # external doc source (app.rag.docs_ingest) skip re-embedding chunks
+    # whose text hasn't changed, instead of wiping and rebuilding every
+    # chunk on every version bump. Null for chunks ingested before this
+    # column existed - see app.rag.ingest's diff logic, which treats a
+    # null/unmatched hash as "not present, must be replaced."
+    content_hash: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)

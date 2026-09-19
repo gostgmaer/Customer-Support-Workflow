@@ -74,8 +74,9 @@ environment variables (see `.env.example`):
 | Concern       | Zero-setup default              | Production option                          |
 | ------------- | -------------------------------- | ------------------------------------------- |
 | LLM           | `MOCK_LLM=true` (deterministic, offline) | `MOCK_LLM=false` + `GOOGLE_API_KEY`/`XAI_API_KEY` (default primary/fallback - see below) |
+| Embeddings    | `HashingEmbedder` (lexical, deterministic - automatic whenever `MOCK_LLM=true` or no `GOOGLE_API_KEY`) | Real `gemini-embedding-2` via LangChain, automatic once `MOCK_LLM=false` + `GOOGLE_API_KEY` are set |
 | Database      | SQLite (`DATABASE_URL=sqlite+aiosqlite:///...`) | Postgres (`DATABASE_URL=postgresql+asyncpg://...`) |
-| Vector store  | `VECTOR_BACKEND=memory` (process-local) | `VECTOR_BACKEND=pgvector` |
+| Vector store  | `VECTOR_BACKEND=memory` (process-local numpy) | `VECTOR_BACKEND=pgvector` (real `vector` column + HNSW index, plus `tsvector`/GIN full-text for hybrid retrieval) |
 | Checkpointer  | SQLite (`CHECKPOINT_DB_PATH`)    | Swap for `langgraph-checkpoint-postgres` in a multi-instance deployment |
 
 None of `app/workflow`, `app/agents`, or `app/api` change when you swap any
