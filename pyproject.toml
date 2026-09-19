@@ -58,6 +58,14 @@ dependencies = [
     # matching this project's existing "no new system dependency" bar.
     "pypdf>=5.0.0",
     "python-docx>=1.1.0",
+    # Original-file storage for KB uploads (spec: multi-provider, R2
+    # default) - boto3 covers both "r2" and "s3" (R2 is S3-API-compatible,
+    # see app.storage.s3_compatible); azure-storage-blob's real async
+    # client covers "azure". Neither is required unless that provider is
+    # actually selected (FILE_STORAGE_PROVIDER) - the zero-setup "local"
+    # default needs neither.
+    "boto3>=1.35.0",
+    "azure-storage-blob>=12.23.0",
 ]
 
 [project.optional-dependencies]

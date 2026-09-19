@@ -143,6 +143,35 @@ class Settings(BaseSettings):
     microsoft_oauth_tenant_id: str = Field(default="common", alias="MICROSOFT_OAUTH_TENANT_ID")
     microsoft_oauth_redirect_uri: str = Field(default="", alias="MICROSOFT_OAUTH_REDIRECT_URI")
 
+    # --- Original-file storage (spec: KB upload keeps the source file, not
+    # just its extracted text) - one provider active at a time, chosen by
+    # FILE_STORAGE_PROVIDER, mirroring VECTOR_BACKEND/CHECKPOINT_BACKEND's
+    # own pluggable-backend pattern above. Cloudflare R2 is the default
+    # (S3-compatible, no egress fees); "local" (zero-setup, writes under
+    # ./data/uploads) is what tests and an unconfigured dev checkout
+    # actually get, since none of the cloud providers have real
+    # zero-config credentials. Switching providers later doesn't move
+    # already-stored files by itself - see scripts/storage/migrate_file_storage.py.
+    file_storage_provider: str = Field(default="r2", alias="FILE_STORAGE_PROVIDER")  # r2 | s3 | azure | local
+    local_storage_dir: str = Field(default="./data/uploads", alias="LOCAL_STORAGE_DIR")
+
+    # R2 (Cloudflare) - S3-compatible; endpoint is account-specific, unlike
+    # real AWS S3's fixed regional endpoints.
+    r2_account_id: str = Field(default="", alias="R2_ACCOUNT_ID")
+    r2_access_key_id: str = Field(default="", alias="R2_ACCESS_KEY_ID")
+    r2_secret_access_key: str = Field(default="", alias="R2_SECRET_ACCESS_KEY")
+    r2_bucket: str = Field(default="", alias="R2_BUCKET")
+
+    # AWS S3
+    s3_access_key_id: str = Field(default="", alias="S3_ACCESS_KEY_ID")
+    s3_secret_access_key: str = Field(default="", alias="S3_SECRET_ACCESS_KEY")
+    s3_bucket: str = Field(default="", alias="S3_BUCKET")
+    s3_region: str = Field(default="us-east-1", alias="S3_REGION")
+
+    # Azure Blob Storage
+    azure_storage_connection_string: str = Field(default="", alias="AZURE_STORAGE_CONNECTION_STRING")
+    azure_storage_container: str = Field(default="", alias="AZURE_STORAGE_CONTAINER")
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

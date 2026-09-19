@@ -420,3 +420,65 @@ async def test_upload_records_who_uploaded_it_but_seeded_articles_have_no_upload
     seeded = await _make_article(db_session, title="Seeded Policy", category="general")
     detail = await client.get(f"/api/v1/knowledge/articles/{seeded.id}", headers=headers)
     assert detail.json()["created_by"] is None
+
+
+@pytest.mark.asyncio
+async def test_upload_without_configured_storage_still_succeeds(client, admin_staff_token):
+    """The default FILE_STORAGE_PROVIDER is "r2" (spec: multi-provider
+    upload storage), but no real R2 credentials exist in the test
+    environment - the upload must still succeed with the original file
+    simply not stored, never fail because of it."""
+    files = {"file": ("policy.txt", b"Some policy content.", "text/plain")}
+    data = {"title": "Unstored Policy", "category": "general"}
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+    response = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["has_original_file"] is False
+
+
+@pytest.mark.asyncio
+async def test_upload_stores_the_original_file_when_local_storage_is_configured(
+    client, admin_staff_token, tmp_path, monkeypatch
+):
+    from app.config import get_settings
+
+    monkeypatch.setenv("FILE_STORAGE_PROVIDER", "local")
+    monkeypatch.setenv("LOCAL_STORAGE_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        files = {"file": ("policy.txt", b"Some policy content.", "text/plain")}
+        data = {"title": "Stored Policy", "category": "general"}
+        headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+        uploaded = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+        assert uploaded.status_code == 201, uploaded.text
+        assert uploaded.json()["has_original_file"] is True
+        article_id = uploaded.json()["id"]
+
+        downloaded = await client.get(
+            f"/api/v1/knowledge/articles/{article_id}/file", headers=headers
+        )
+        assert downloaded.status_code == 200
+        assert downloaded.content == b"Some policy content."
+        assert "policy.txt" in downloaded.headers["content-disposition"]
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_download_file_for_article_with_no_stored_file_is_a_clean_error(
+    client, admin_staff_token
+):
+    files = {"file": ("policy.txt", b"content", "text/plain")}
+    data = {"title": "No File Policy", "category": "general"}
+    headers = {"Authorization": f"Bearer {admin_staff_token}"}
+
+    uploaded = await client.post("/api/v1/knowledge/upload", files=files, data=data, headers=headers)
+    article_id = uploaded.json()["id"]
+    assert uploaded.json()["has_original_file"] is False
+
+    response = await client.get(f"/api/v1/knowledge/articles/{article_id}/file", headers=headers)
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_ERROR"

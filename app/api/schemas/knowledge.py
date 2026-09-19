@@ -30,6 +30,7 @@ class KnowledgeArticleDetail(BaseModel):
     helpful_no_count: int
     helpful_percent: int | None
     created_by: str | None
+    has_original_file: bool
     created_at: str
     updated_at: str
 

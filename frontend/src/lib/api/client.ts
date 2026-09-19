@@ -106,3 +106,29 @@ export async function apiUpload<T>(path: string, formData: FormData): Promise<T>
   const response = await fetch(buildUrl(path), { method: "POST", headers, body: formData });
   return handleResponse<T>(response, false);
 }
+
+function filenameFromContentDisposition(header: string | null): string | undefined {
+  const match = header?.match(/filename="?([^"]+)"?/);
+  return match?.[1];
+}
+
+/**
+ * Binary file download (e.g. a KB article's original uploaded file) -
+ * separate from `apiFetch` because a successful response here is a raw
+ * byte stream, not JSON; an error response is still the usual JSON error
+ * body, so that path reuses `handleResponse`.
+ */
+export async function apiDownload(path: string): Promise<{ blob: Blob; filename?: string }> {
+  const headers: Record<string, string> = {};
+  const token = useAuthStore.getState().session?.token;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(buildUrl(path), { headers });
+  if (!response.ok) {
+    await handleResponse(response, false);
+  }
+  return {
+    blob: await response.blob(),
+    filename: filenameFromContentDisposition(response.headers.get("content-disposition")),
+  };
+}

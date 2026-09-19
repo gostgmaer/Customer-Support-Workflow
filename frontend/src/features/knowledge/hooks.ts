@@ -4,6 +4,7 @@ import { toast } from "@/store/toast-store";
 
 import {
   askKnowledgeBase,
+  downloadKnowledgeArticleFile,
   getKnowledgeArticle,
   getRelatedKnowledgeArticles,
   listKnowledgeArticles,
@@ -68,5 +69,22 @@ export function useAskKnowledgeBase() {
   return useMutation({
     mutationFn: askKnowledgeBase,
     onError: (error) => toast.error("Couldn't get an answer", error instanceof Error ? error.message : undefined),
+  });
+}
+
+export function useDownloadKnowledgeArticleFile() {
+  return useMutation({
+    mutationFn: async (articleId: string) => {
+      const { blob, filename } = await downloadKnowledgeArticleFile(articleId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename ?? "download";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    },
+    onError: (error) => toast.error("Couldn't download file", error instanceof Error ? error.message : undefined),
   });
 }

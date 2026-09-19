@@ -1,4 +1,4 @@
-import { apiFetch, apiUpload } from "@/lib/api/client";
+import { apiDownload, apiFetch, apiUpload } from "@/lib/api/client";
 import type {
   KnowledgeArticleDetail,
   KnowledgeArticleSummary,
@@ -44,4 +44,8 @@ export function askKnowledgeBase(question: string) {
     method: "POST",
     body: { question },
   });
+}
+
+export function downloadKnowledgeArticleFile(articleId: string) {
+  return apiDownload(`/api/v1/knowledge/articles/${articleId}/file`);
 }

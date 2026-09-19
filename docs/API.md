@@ -280,6 +280,7 @@ GET  /api/v1/knowledge/categories                              -> [{category, ar
 GET  /api/v1/knowledge/articles?category=&q=&sort=recent|popular&limit=50  -> [ArticleSummary, ...]
 GET  /api/v1/knowledge/articles/{id}                            -> ArticleDetail
 GET  /api/v1/knowledge/articles/{id}/related                    -> [ArticleSummary, ...]
+GET  /api/v1/knowledge/articles/{id}/file                       -> the original uploaded file (binary)
 POST /api/v1/knowledge/articles/{id}/feedback   body: {"helpful": true|false} -> ArticleDetail
 POST /api/v1/knowledge/upload   (ADMIN only)   multipart: title, category, file  -> 201 ArticleDetail
 POST /api/v1/knowledge/ask   (customer OR staff JWT)   body: {"question": str} -> AskResponse
@@ -311,6 +312,23 @@ to automated docs-integration syncs, not a one-off manual upload.
 `ArticleDetail.created_by` is set to the uploading admin's staff id -
 `null` for anything ingested via `make seed` or a docs-integration sync,
 neither of which has a human uploader to attribute.
+
+**Original-file storage** (spec: multi-provider upload storage, R2
+default - `app.storage.*`): alongside extracting text, `POST /upload`
+makes a best-effort attempt to persist the raw uploaded bytes to whichever
+provider `FILE_STORAGE_PROVIDER` selects (`r2`/`s3`/`azure`/`local`,
+see docs/ENVIRONMENT.md). This never fails the upload - if the provider
+is unconfigured or unreachable, the article is still created with
+`has_original_file: false`, since it's already fully usable (browsable,
+RAG-retrievable) from `raw_text` alone. When it succeeds,
+`GET /articles/{id}/file` streams the original bytes back (`Content-
+Disposition: attachment`) - reading from whichever provider that specific
+document's file actually lives on, not necessarily the currently-
+configured default, since an operator can switch `FILE_STORAGE_PROVIDER`
+later without that changing where already-uploaded files are. Run
+`scripts/storage/migrate_file_storage.py` (`--dry-run` to preview,
+`--delete-old` to remove the source copy once confirmed) to move existing
+files onto a newly-selected provider.
 
 Text extraction (`app.rag.file_extractors`) is format-specific: `.md`/`.txt`
 are decoded as UTF-8 directly; `.pdf` uses `pypdf` (page-by-page

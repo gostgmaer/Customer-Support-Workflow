@@ -168,6 +168,7 @@ export interface KnowledgeArticleDetail {
   helpful_no_count: number;
   helpful_percent: number | null;
   created_by: string | null;
+  has_original_file: boolean;
   created_at: string;
   updated_at: string;
 }

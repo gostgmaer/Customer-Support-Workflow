@@ -31,6 +31,16 @@ class KnowledgeDocument(Base, TimestampMixin, TenantScopedMixin):
     # files or a docs-integration sync, neither of which has a human
     # uploader to attribute (mirrors Integration.created_by's precedent).
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Where the *original* uploaded file lives (app.storage.*), if it was
+    # stored at all - both null unless a POST /upload's file was actually
+    # persisted (storing it is optional, see app.api.routes.knowledge).
+    # storage_provider is recorded per-document rather than always
+    # trusting the CURRENT Settings.file_storage_provider, since a
+    # document's file stays on whichever provider it was written to even
+    # after an operator switches providers going forward - see
+    # scripts/storage/migrate_file_storage.py for moving it.
+    storage_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class KnowledgeChunk(Base, TimestampMixin, TenantScopedMixin):

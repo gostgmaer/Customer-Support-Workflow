@@ -1,7 +1,7 @@
 "use client";
 
 import { format } from "date-fns";
-import { Calendar, Eye, ThumbsDown, ThumbsUp, UserRound } from "lucide-react";
+import { Calendar, Download, Eye, ThumbsDown, ThumbsUp, UserRound } from "lucide-react";
 import Link from "next/link";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -10,7 +10,12 @@ import type { Components } from "react-markdown";
 import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { Badge } from "@/components/ui/Badge";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { useKnowledgeArticle, useRelatedKnowledgeArticles, useSubmitKnowledgeFeedback } from "@/features/knowledge/hooks";
+import {
+  useDownloadKnowledgeArticleFile,
+  useKnowledgeArticle,
+  useRelatedKnowledgeArticles,
+  useSubmitKnowledgeFeedback,
+} from "@/features/knowledge/hooks";
 
 /** Article bodies now come from four different sources (plain .md/.txt
  * seed files, and .pdf/.docx uploads extracted via app.rag.file_extractors)
@@ -47,6 +52,7 @@ export function ArticleDetail({ articleId }: { articleId: string }) {
   const article = useKnowledgeArticle(articleId);
   const related = useRelatedKnowledgeArticles(articleId);
   const feedback = useSubmitKnowledgeFeedback(articleId);
+  const downloadFile = useDownloadKnowledgeArticleFile();
 
   if (article.isError) {
     return <ApiErrorState error={article.error} />;
@@ -152,6 +158,18 @@ export function ArticleDetail({ articleId }: { articleId: string }) {
             Source: {doc.source} · v{doc.version}
           </div>
         </dl>
+
+        {doc.has_original_file && (
+          <button
+            type="button"
+            onClick={() => downloadFile.mutate(doc.id)}
+            disabled={downloadFile.isPending}
+            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-50"
+          >
+            <Download className="size-4" aria-hidden="true" />
+            Download original file
+          </button>
+        )}
       </aside>
     </div>
   );

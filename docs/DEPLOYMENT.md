@@ -128,6 +128,33 @@ vars for anything that should be the same across all tenants and set once
 at deploy time. Only `ADMIN` role can call this API, and it can never
 touch secrets - see "DB-backed runtime settings" in `docs/SECURITY.md`.
 
+## Original-file storage for KB uploads (R2 / S3 / Azure / local)
+
+`FILE_STORAGE_PROVIDER` picks exactly one active provider for storing the
+original file behind a Knowledge Base upload - see docs/ENVIRONMENT.md's
+"Original-file storage for KB uploads" section for the full variable
+list per provider. Defaults to `r2` (Cloudflare R2); an unconfigured or
+unreachable provider never breaks an upload, it just leaves that
+article's `has_original_file` false.
+
+**Switching providers** (e.g. moving from R2 to S3) does not move
+already-uploaded files by itself - each document remembers which
+provider its own file actually lives on. Run this once you've updated
+`FILE_STORAGE_PROVIDER` (and that provider's credentials) to the new
+target:
+
+```bash
+python scripts/storage/migrate_file_storage.py --dry-run   # preview first
+python scripts/storage/migrate_file_storage.py              # then actually copy
+python scripts/storage/migrate_file_storage.py --delete-old  # optional: remove the old copies once confirmed
+```
+
+It downloads each document's file from whatever provider it's currently
+on and re-uploads it to the newly-configured one, updating the database
+row only after the copy succeeds - a failed migration for one document
+never loses that file (the old copy stays put unless `--delete-old` is
+passed and the new copy already landed).
+
 ## External integrations (JIRA / WooCommerce / email / custom APIs / MCP servers / OpenAPI APIs / Stripe)
 
 Connect these from the running app instead of an env var - `ADMIN` ->

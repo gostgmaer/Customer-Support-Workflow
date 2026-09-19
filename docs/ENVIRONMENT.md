@@ -46,6 +46,28 @@ correct as-is, or only matters once you want a specific real capability.
 | `VECTOR_BACKEND` | `memory` | Where the knowledge-base vector index lives: `memory` (process-local, resets on restart) or `pgvector` (durable, shared, needs Postgres). **Docker Compose hardcodes `pgvector`** for the `api` service regardless of this value. | Leave as `memory` for quick local testing; `pgvector` for anything you want to persist or share across instances. |
 | `VECTOR_DIMENSIONS` | `384` | Embedding vector size - must match whatever `Embedder` you're actually using. **Not passed through in Docker Compose.** | Leave as-is unless you swap in a real embeddings model with a different output size. |
 
+## Original-file storage for KB uploads (spec: multi-provider, R2 default)
+
+Where the *original* file behind a Knowledge Base upload (`POST /api/v1/knowledge/upload`) is
+kept, separately from its extracted text (which always lands in the database regardless of
+this section). Storing the original file is optional and best-effort - a misconfigured or
+unreachable provider never fails the upload itself, it just means `has_original_file` stays
+`false` for that article. See `scripts/storage/migrate_file_storage.py` for moving already-
+uploaded files onto a newly-selected provider.
+
+| Variable | Default | Purpose | Recommendation |
+|---|---|---|---|
+| `FILE_STORAGE_PROVIDER` | `r2` | Which provider is active: `r2`, `s3`, `azure`, or `local`. One at a time - this isn't a fallback chain. | `local` for zero-setup dev (writes under `LOCAL_STORAGE_DIR`, no account needed); pick a real cloud provider for production. |
+| `LOCAL_STORAGE_DIR` | `./data/uploads` | Where `local` writes files. Only matters when `FILE_STORAGE_PROVIDER=local`. | Leave as-is for dev; not meant for production use (single-instance, no redundancy). |
+| `R2_ACCOUNT_ID` | *(blank)* | Cloudflare account id - used to build R2's account-specific S3-compatible endpoint. | Required if `FILE_STORAGE_PROVIDER=r2`. |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | *(blank)* | R2 API token credentials (create one under R2 → Manage API Tokens). | Required if `FILE_STORAGE_PROVIDER=r2`. |
+| `R2_BUCKET` | *(blank)* | The R2 bucket to upload into. | Required if `FILE_STORAGE_PROVIDER=r2`. |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | *(blank)* | Real AWS IAM credentials. | Required if `FILE_STORAGE_PROVIDER=s3`. |
+| `S3_BUCKET` | *(blank)* | The S3 bucket to upload into. | Required if `FILE_STORAGE_PROVIDER=s3`. |
+| `S3_REGION` | `us-east-1` | The bucket's AWS region. | Match whatever region your bucket actually lives in. |
+| `AZURE_STORAGE_CONNECTION_STRING` | *(blank)* | Full Azure Storage account connection string. | Required if `FILE_STORAGE_PROVIDER=azure`. |
+| `AZURE_STORAGE_CONTAINER` | *(blank)* | The blob container to upload into. | Required if `FILE_STORAGE_PROVIDER=azure`. |
+
 ## AI / LLM providers
 
 | Variable | Default | Purpose | Recommendation |

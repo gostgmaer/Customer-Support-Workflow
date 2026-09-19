@@ -19,7 +19,7 @@ import re
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.resolution import draft_response
@@ -37,6 +37,7 @@ from app.db.session import get_db
 from app.domain.exceptions import ValidationError
 from app.domain.models import KnowledgeDocument
 from app.llm.router import TenantScopedLLMRouter, get_llm_router
+from app.observability.logging import get_logger
 from app.rag.file_extractors import SUPPORTED_UPLOAD_EXTENSIONS, FileExtractionError, extract_text
 from app.rag.ingest import ingest_documents
 from app.rag.loaders import LoadedDocument, clean_text
@@ -44,6 +45,10 @@ from app.rag.retriever import Retriever
 from app.repositories.knowledge import KnowledgeDocumentRepository
 from app.repositories.vector_store import get_vector_store
 from app.security.auth import get_current_user, require_staff_role
+from app.storage.base import FileNotFoundInStorage
+from app.storage.factory import StorageNotConfiguredError, get_file_storage
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/knowledge", tags=["knowledge"])
 
@@ -116,9 +121,20 @@ def _to_detail(document: KnowledgeDocument) -> dict:
         "helpful_no_count": document.helpful_no_count,
         "helpful_percent": KnowledgeDocumentRepository.helpful_percent(document),
         "created_by": document.created_by,
+        "has_original_file": document.storage_key is not None,
         "created_at": document.created_at.isoformat(),
         "updated_at": document.updated_at.isoformat(),
     }
+
+
+def _original_filename(document: KnowledgeDocument) -> str:
+    # source is always "upload:<uuid>:<filename>" for an uploaded document
+    # (see upload_knowledge_document below) - fall back to the title if
+    # this is ever called on something that doesn't match that shape.
+    parts = document.source.split(":", 2)
+    if len(parts) == 3 and parts[0] == "upload":
+        return parts[2]
+    return document.title
 
 
 @router.get("/categories", response_model=list[KnowledgeCategorySummary])
@@ -265,8 +281,61 @@ async def upload_knowledge_document(
     # neither of which has a human uploader - set separately here rather
     # than threading an optional uploader id through that shared pipeline.
     stored.created_by = admin_id
+
+    # Storing the original file is a best-effort add-on, never a reason to
+    # fail an otherwise-successful upload - the article is already fully
+    # usable (browsable, RAG-retrievable) from raw_text alone. Skipped
+    # silently (info, not warning) when no provider is configured at all,
+    # since that's this app's own zero-setup default state, not an error.
+    storage_key = f"knowledge/{tenant_id}/{stored.id}/{filename}"
+    try:
+        storage = get_file_storage()
+        await storage.upload(
+            storage_key, raw, content_type=file.content_type or "application/octet-stream"
+        )
+    except StorageNotConfiguredError:
+        logger.info("kb_upload_original_file_storage_skipped", document_id=stored.id)
+    except Exception:
+        logger.warning("kb_upload_original_file_storage_failed", document_id=stored.id, exc_info=True)
+    else:
+        stored.storage_provider = get_settings().file_storage_provider
+        stored.storage_key = storage_key
+
     await session.commit()
     return _to_detail(stored)
+
+
+@router.get("/articles/{article_id}/file")
+async def download_original_file(
+    article_id: str,
+    session: AsyncSession = Depends(get_db),
+    staff: tuple[str, str, str] = RequireStaff,
+) -> Response:
+    """Streams back the exact file that was uploaded (not the extracted
+    `raw_text`) - reads from whichever provider that specific document's
+    file actually lives on (`document.storage_provider`), which may not
+    be the currently-configured default if an operator has since switched
+    providers (see scripts/storage/migrate_file_storage.py)."""
+    _staff_id, _role, tenant_id = staff
+    repo = KnowledgeDocumentRepository(session, tenant_id)
+    document = await repo.get(article_id)
+    if document is None:
+        raise ValidationError(f"Knowledge article {article_id} not found")
+    if document.storage_key is None:
+        raise ValidationError("No original file was stored for this article")
+
+    storage = get_file_storage(document.storage_provider)
+    try:
+        data = await storage.download(document.storage_key)
+    except FileNotFoundInStorage as exc:
+        raise ValidationError("The original file could not be found in storage") from exc
+
+    filename = _original_filename(document)
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/ask", response_model=KnowledgeAskResponse)

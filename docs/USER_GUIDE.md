@@ -121,6 +121,14 @@ content, edit the source files under `scripts/seed/knowledge/`
 and re-run `make seed`, or re-sync a connected docs integration - a direct
 upload always creates a new article rather than replacing one.
 
+The original file itself (not just its extracted text) is also kept, if
+your deployment has a storage provider configured - a **Download original
+file** button appears on the article page when it is. This is entirely
+optional infrastructure: if nothing's configured yet, uploads still work
+exactly as above, just without that button. See docs/ENVIRONMENT.md's
+"Original-file storage" section for setting up Cloudflare R2 (the
+default), AWS S3, or Azure Blob Storage.
+
 ## Staff: the ticket queue
 
 Log in at `/staff/login` with a staff account, then go to `/tickets` from
