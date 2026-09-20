@@ -1,12 +1,13 @@
 import { BookOpen, ThumbsUp } from "lucide-react";
 import Link from "next/link";
 
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useKnowledgeArticles } from "@/features/knowledge/hooks";
 
 export function KnowledgeBaseSpotlight() {
-  const { data: articles, isLoading } = useKnowledgeArticles({ sort: "popular", limit: 4 });
+  const { data: articles, isLoading, isError, error } = useKnowledgeArticles({ sort: "popular", limit: 4 });
 
   return (
     <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
@@ -23,6 +24,8 @@ export function KnowledgeBaseSpotlight() {
             <Skeleton key={i} className="h-12 w-full" />
           ))}
         </div>
+      ) : isError ? (
+        <ApiErrorState error={error} />
       ) : !articles || articles.length === 0 ? (
         <EmptyState
           icon={BookOpen}

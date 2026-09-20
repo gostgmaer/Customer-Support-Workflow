@@ -3,6 +3,7 @@
 import { MessageSquare, RotateCcw } from "lucide-react";
 import { useEffect, useRef } from "react";
 
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -52,6 +53,8 @@ export function ChatThread({
             <Skeleton className="h-12 w-3/5" />
           </div>
         )}
+
+        {messages.isError && <ApiErrorState error={messages.error} />}
 
         {messages.isSuccess && messages.data.length === 0 && (
           <EmptyState

@@ -56,28 +56,38 @@ function KnowledgeBaseContent() {
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div className="inline-flex rounded-lg border border-border bg-card p-1 shadow-sm">
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
+            aria-pressed={mode === "browse"}
             onClick={() => setMode("browse")}
             className={cn(
-              "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              mode === "browse" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
+              "rounded-md",
+              mode === "browse"
+                ? "bg-accent text-accent-foreground hover:bg-accent"
+                : "text-muted-foreground hover:text-foreground"
             )}
           >
             <BookOpen className="size-4" aria-hidden="true" />
             Browse
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
+            aria-pressed={mode === "ask"}
             onClick={() => setMode("ask")}
             className={cn(
-              "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              mode === "ask" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
+              "rounded-md",
+              mode === "ask"
+                ? "bg-accent text-accent-foreground hover:bg-accent"
+                : "text-muted-foreground hover:text-foreground"
             )}
           >
             <MessageCircleQuestion className="size-4" aria-hidden="true" />
             Ask
-          </button>
+          </Button>
         </div>
 
         {isAdmin && mode === "browse" && (
@@ -120,17 +130,19 @@ function KnowledgeBaseContent() {
                   {category ? `Category: ${category}` : `Search: "${q}"`}
                   {results.data && <span className="ml-2 text-muted-foreground">({results.data.length})</span>}
                 </h2>
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="sm"
                   onClick={() => {
                     setDraft("");
                     applyFilters({});
                   }}
-                  className="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground"
+                  className="text-muted-foreground hover:text-foreground"
                 >
                   <X className="size-3.5" aria-hidden="true" />
                   Clear
-                </button>
+                </Button>
               </div>
 
               {results.isError && <ApiErrorState error={results.error} />}

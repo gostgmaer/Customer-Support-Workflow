@@ -9,6 +9,7 @@ import type { Components } from "react-markdown";
 
 import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
 import {
   useDownloadKnowledgeArticleFile,
@@ -88,24 +89,26 @@ export function ArticleDetail({ articleId }: { articleId: string }) {
         <div className="rounded-lg border border-border bg-card p-5 text-center shadow-sm">
           <p className="mb-3 text-sm font-medium text-foreground">Was this article helpful?</p>
           <div className="flex justify-center gap-3">
-            <button
+            <Button
               type="button"
+              variant="outline"
               onClick={() => feedback.mutate(true)}
               disabled={feedback.isPending}
-              className="flex items-center gap-1.5 rounded-md border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-success-bg hover:text-success disabled:pointer-events-none disabled:opacity-50"
+              className="hover:bg-success-bg hover:text-success"
             >
               <ThumbsUp className="size-4" aria-hidden="true" />
               Yes
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
+              variant="outline"
               onClick={() => feedback.mutate(false)}
               disabled={feedback.isPending}
-              className="flex items-center gap-1.5 rounded-md border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-danger-bg hover:text-danger disabled:pointer-events-none disabled:opacity-50"
+              className="hover:bg-danger-bg hover:text-danger"
             >
               <ThumbsDown className="size-4" aria-hidden="true" />
               No
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -160,15 +163,16 @@ export function ArticleDetail({ articleId }: { articleId: string }) {
         </dl>
 
         {doc.has_original_file && (
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={() => downloadFile.mutate(doc.id)}
-            disabled={downloadFile.isPending}
-            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-50"
+            isLoading={downloadFile.isPending}
+            className="mt-4 w-full"
           >
             <Download className="size-4" aria-hidden="true" />
             Download original file
-          </button>
+          </Button>
         )}
       </aside>
     </div>

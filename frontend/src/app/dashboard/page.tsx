@@ -4,6 +4,7 @@ import Link from "next/link";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
+import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { CommandBar } from "@/features/dashboard/components/CommandBar";
 import { KnowledgeBaseSpotlight } from "@/features/dashboard/components/KnowledgeBaseSpotlight";
 import { PriorityDistribution } from "@/features/dashboard/components/PriorityDistribution";
@@ -22,6 +23,8 @@ function DashboardContent() {
         <h1 className="text-xl font-semibold text-foreground">Welcome back{firstName ? `, ${firstName}` : ""}</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">Here&apos;s what&apos;s happening across the support desk.</p>
       </div>
+
+      {tickets.isError && <ApiErrorState error={tickets.error} />}
 
       <CommandBar tickets={tickets.data} isLoading={tickets.isLoading} />
 

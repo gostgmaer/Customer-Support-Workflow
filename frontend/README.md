@@ -79,10 +79,18 @@ never skip a layer.
   rather than offering a conversation history/switcher. "New conversation"
   starts a fresh thread; the old one is still on the server, just not
   reachable from this UI.
-- **No live push for ticket updates.** The ticket queue and a pending
-  conversation both poll (`refetchInterval`) rather than using a
-  websocket/SSE - fine at this scale, but a real-time desk would want push
-  instead.
+- **Ticket queue list still polls, but an open conversation now gets a
+  real push.** The staff ticket queue table (`features/tickets/hooks.ts`,
+  `refetchInterval: 15_000`) has no push and won't until a real desk
+  needs it. A customer's own open conversation is different: it gets a
+  live websocket nudge (`useConversationSocket`, backed by
+  `GET /api/v1/support/ws/conversations/{id}`) both when a connected
+  storefront webhook correlates to it and when a staff member approves/
+  rejects a paused ticket on it - the 5-second `refetchInterval` while
+  `awaiting_approval` (`features/chat/hooks.ts`) is now just the
+  fallback for a customer who isn't currently connected, not the only
+  mechanism. Customer-side only - no staff-side (ticket queue) push was
+  built.
 - **WooCommerce lookup is staff-triggered, not autonomous.** The AI never
   calls WooCommerce on its own - a staff member types an order number into
   the ticket detail panel. See `docs/SECURITY.md`'s "External
