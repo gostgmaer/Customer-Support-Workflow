@@ -20,6 +20,11 @@ class Intent(StrEnum):
     ADDRESS_CHANGE = "ADDRESS_CHANGE"
     PAYMENT_RETRY = "PAYMENT_RETRY"
     EXCHANGE = "EXCHANGE"
+    # spec: Phase 13 - profile/contact info changes (name, email). Distinct
+    # from ACCOUNT_ACCESS/PASSWORD_RESET (getting back INTO the account) and
+    # from BILLING/payment-method concerns - this is "change what's on the
+    # account", always human-approved (see app.config.policies).
+    PROFILE_UPDATE = "PROFILE_UPDATE"
     PRODUCT_INFORMATION = "PRODUCT_INFORMATION"
     TECHNICAL_SUPPORT = "TECHNICAL_SUPPORT"
     BUG_REPORT = "BUG_REPORT"
@@ -33,10 +38,21 @@ class Intent(StrEnum):
 
 
 # Intents that always require deterministic escalation regardless of confidence.
+# spec: Phase 13 audit - PRIVACY was NOT here despite SECURITY/FRAUD/LEGAL
+# being here, and app.agents.resolution had no KNOWLEDGE_INTENTS/
+# INTENT_RESOLVERS entry for it either - a PRIVACY-classified message
+# (including a GDPR "delete my data" request) silently produced an empty
+# ResolutionOutcome() with zero facts and no escalation. A privacy/data
+# request (informational or a deletion request) is exactly the kind of
+# thing that should always reach a human, matching this app's existing
+# treatment of every other legally-sensitive intent - fixed here rather
+# than only handling the deletion sub-case, since the bug affected every
+# PRIVACY message, not just deletion requests.
 ALWAYS_ESCALATE_INTENTS = {
     Intent.SECURITY,
     Intent.FRAUD,
     Intent.LEGAL,
+    Intent.PRIVACY,
 }
 
 # Intents that require calling customer-data tools to answer accurately.
@@ -54,6 +70,7 @@ DATA_REQUIRED_INTENTS = {
     Intent.ADDRESS_CHANGE,
     Intent.PAYMENT_RETRY,
     Intent.EXCHANGE,
+    Intent.PROFILE_UPDATE,
 }
 
 # Intents best answered from the knowledge base.

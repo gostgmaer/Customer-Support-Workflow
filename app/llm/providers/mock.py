@@ -34,12 +34,25 @@ _KEYWORD_INTENTS: list[tuple[re.Pattern, str]] = [
     (
         re.compile(
             r"\bwhere.*(order|package)|track.*(order|package)|order status\b|"
-            r"(check|status).*\border\b|\border\b.*(check|status)",
+            r"(check|status).*\border\b|\border\b.*(check|status)|"
+            # spec: Phase 13 - "shows delivered but I never got it" (a lost-
+            # package discrepancy, see app.agents.resolution's
+            # _NEVER_ARRIVED_RE) must still classify as ORDER_STATUS so it
+            # reaches resolve_order_status, which does the actual
+            # discrepancy check.
+            r"\bnever (received|got|arrived)\b|\bmissing package\b",
             re.I,
         ),
         "ORDER_STATUS",
     ),
     (re.compile(r"\bpassword\b", re.I), "PASSWORD_RESET"),
+    # spec: Phase 13 - specific-before-general, same reasoning as
+    # SUBSCRIPTION_CHANGE below: "update my email"/"change my name" must
+    # match PROFILE_UPDATE, not the broader ACCOUNT_ACCESS pattern.
+    (
+        re.compile(r"\b(update|change)\b.*\b(email|name|profile)\b", re.I),
+        "PROFILE_UPDATE",
+    ),
     # Specific-before-general (spec: Phase 8.3): an "upgrade/downgrade my
     # plan" message must match SUBSCRIPTION_CHANGE, not the broader
     # SUBSCRIPTION pattern below it.
@@ -50,15 +63,46 @@ _KEYWORD_INTENTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bcancel\b.*\bsubscription\b|\bsubscription\b", re.I), "SUBSCRIPTION"),
     (re.compile(r"\bretry\b.*\bpayment\b|\bpayment\b.*\bretry\b", re.I), "PAYMENT_RETRY"),
     (re.compile(r"\bpayment (failed|declined)\b|charged.*fail|money.*deduct", re.I), "PAYMENT_FAILURE"),
-    (re.compile(r"\bbill(ing)?\b|\binvoice\b", re.I), "BILLING"),
+    (
+        re.compile(
+            r"\bbill(ing)?\b|\binvoice\b|"
+            # spec: Phase 13 - duplicate charge / payment method / gift
+            # card / promo all route to BILLING; resolve_billing branches
+            # on the message content from there (see its docstring).
+            r"\bcharged (me )?twice\b|\bdouble[- ]?charged?\b|\bduplicate charge\b|\bbilled twice\b|"
+            r"\bpayment method\b|\bgift card\b|\bstore credit\b|\bpromo( code)?\b|\bcoupon\b|"
+            r"\bdiscount code\b",
+            re.I,
+        ),
+        "BILLING",
+    ),
     # Specific-before-general: a "change my shipping address" message must
     # match ADDRESS_CHANGE, not the broader SHIPPING pattern below it.
     (re.compile(r"\b(change|update)\b.*\baddress\b|\bshipping address\b", re.I), "ADDRESS_CHANGE"),
     (re.compile(r"\bship(ping|ment)?\b", re.I), "SHIPPING"),
-    (re.compile(r"\bexchange\b", re.I), "EXCHANGE"),
+    (
+        re.compile(
+            # spec: Phase 13 - "wrong item"/"sent me the wrong X" is a
+            # real exchange scenario a customer wouldn't necessarily
+            # phrase using the word "exchange".
+            r"\bexchange\b|\b(wrong|incorrect) item\b|\bsent me the wrong\b",
+            re.I,
+        ),
+        "EXCHANGE",
+    ),
     (re.compile(r"\breturn\b", re.I), "RETURNS"),
     (re.compile(r"\bcrash|error|bug|doesn'?t work|not working\b", re.I), "TECHNICAL_SUPPORT"),
-    (re.compile(r"\baccount (access|locked|lockout)\b", re.I), "ACCOUNT_ACCESS"),
+    (
+        re.compile(
+            r"\baccount (access|locked|lockout)\b|"
+            # spec: Phase 13 - a duplicate-account merge request is
+            # recognized inside resolve_account_access itself, but must
+            # first classify as ACCOUNT_ACCESS to reach it.
+            r"\bmerge\b.*\baccounts?\b|\btwo accounts?\b|\bduplicate account\b",
+            re.I,
+        ),
+        "ACCOUNT_ACCESS",
+    ),
     (
         re.compile(r"\bcontacted support (three|3|multiple|several) times|nobody has (fixed|helped)\b", re.I),
         "COMPLAINT",
@@ -66,6 +110,12 @@ _KEYWORD_INTENTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bwish|would be nice|feature request|please add\b", re.I), "FEATURE_REQUEST"),
     (re.compile(r"\bwhat information do you (collect|store)|privacy\b", re.I), "PRIVACY"),
     (re.compile(r"\blegal|lawsuit|attorney\b", re.I), "LEGAL"),
+    # spec: Phase 13 - must precede the generic PRODUCT_INFORMATION
+    # catch-all below: "I want to place a bulk order" matches neither
+    # ORDER_CANCEL nor ORDER_STATUS's patterns and would otherwise fall
+    # all the way to UNKNOWN (the catch-all only matches a "what is/how
+    # does/tell me about"-shaped question).
+    (re.compile(r"\bbulk\b|\bwholesale\b|\blarge quantity\b|\bbuy \d{2,}\b", re.I), "PRODUCT_INFORMATION"),
     (re.compile(r"\bwhat is|how does|tell me about|product\b", re.I), "PRODUCT_INFORMATION"),
 ]
 

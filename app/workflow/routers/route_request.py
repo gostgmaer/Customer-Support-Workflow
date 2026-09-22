@@ -20,14 +20,26 @@ Route = Literal["knowledge_search", "customer_data", "action_required", "human_e
 
 MUTATING_INTENTS = {
     "ORDER_CANCEL", "REFUND", "RETURNS", "SUBSCRIPTION_CHANGE", "ADDRESS_CHANGE", "PAYMENT_RETRY",
+    # spec: Phase 13 - PROFILE_UPDATE is a new mutating intent (identity
+    # change, always human-approved); ACCOUNT_ACCESS and BILLING moved
+    # here from READ_ONLY_DATA_INTENTS below because their resolvers can
+    # now propose a real mutation (account unlock; a duplicate-charge
+    # refund) - this label only affects state["route"]'s observability
+    # value (see this module's docstring), not dispatch, but should stay
+    # accurate now that both can mutate.
+    "PROFILE_UPDATE", "ACCOUNT_ACCESS", "BILLING",
 }
 READ_ONLY_DATA_INTENTS = {
-    "ORDER_STATUS", "SHIPPING", "PAYMENT_FAILURE", "BILLING", "ACCOUNT_ACCESS",
+    "ORDER_STATUS", "SHIPPING", "PAYMENT_FAILURE",
     "PASSWORD_RESET", "SUBSCRIPTION",
 }
 KNOWLEDGE_INTENTS = {
     "PRODUCT_INFORMATION", "TECHNICAL_SUPPORT", "BUG_REPORT", "FEATURE_REQUEST",
-    "PRIVACY", "COMPLAINT", "UNKNOWN", "EXCHANGE",
+    "COMPLAINT", "UNKNOWN", "EXCHANGE",
+    # spec: Phase 13 - PRIVACY removed: it's now in ALWAYS_ESCALATE_INTENTS
+    # (app.domain.enums.intent), checked before this set below, so its
+    # membership here was already unreachable - removed for clarity, not
+    # a behavior change.
 }
 ESCALATE_INTENTS = {i.value for i in ALWAYS_ESCALATE_INTENTS}
 

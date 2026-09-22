@@ -32,6 +32,7 @@ TOOL_PERMISSION_MATRIX: dict[str, ToolPolicy] = {
     "get_subscription": ToolPolicy(True, ApprovalLevel.NONE, ApprovalLevel.NONE),
     "get_refund_status": ToolPolicy(True, ApprovalLevel.NONE, ApprovalLevel.NONE),
     "get_support_history": ToolPolicy(True, ApprovalLevel.NONE, ApprovalLevel.NONE),
+    "list_payments_for_order": ToolPolicy(True, ApprovalLevel.NONE, ApprovalLevel.NONE),
     "cancel_order": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.SOMETIMES),
     "create_refund_request": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.ALWAYS),
     "update_subscription": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.SOMETIMES),
@@ -40,6 +41,10 @@ TOOL_PERMISSION_MATRIX: dict[str, ToolPolicy] = {
     # same tier as reset_password.
     "retry_payment": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.NONE),
     "reset_password": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.NONE),
+    # spec: Phase 13 - identity-modifying actions, always human-approved
+    # per the user's explicit scoping (no lower-friction tier for these).
+    "update_customer_profile": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.ALWAYS),
+    "unlock_account": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.ALWAYS),
     "create_support_ticket": ToolPolicy(True, ApprovalLevel.NONE, ApprovalLevel.NONE),
     "send_verification_email": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.NONE),
     "schedule_callback": ToolPolicy(True, ApprovalLevel.ALWAYS, ApprovalLevel.NONE),

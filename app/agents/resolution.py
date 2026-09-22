@@ -63,6 +63,11 @@ class ResolutionOutcome:
     # source-neutral) for checkpoint backward-compatibility - see
     # resolve_from_knowledge's comment.
     pending_mcp_call: dict | None = None
+    # spec: Phase 13 - the internal-tool analogue of pending_mcp_call, for
+    # a reviewed built-in tool that must not run until approved (see
+    # resolve_profile_update/resolve_account_access and
+    # app.workflow.nodes.human_approval._execute_approved_internal_call).
+    pending_internal_call: dict | None = None
 
 
 async def _handle_order_lookup(ctx: ToolContext, customer_id: str) -> tuple[dict | None, ResolutionOutcome]:
@@ -82,7 +87,16 @@ async def _handle_order_lookup(ctx: ToolContext, customer_id: str) -> tuple[dict
         return None, outcome
 
 
-async def resolve_order_status(ctx: ToolContext, customer_id: str, **_) -> ResolutionOutcome:
+_NEVER_ARRIVED_RE = re.compile(
+    r"\bnever (received|got|arrived)\b|\bdidn'?t (receive|get|arrive)\b|\bmissing package\b|"
+    r"\bshows? delivered\b.*\b(never|didn'?t|but)\b",
+    re.I,
+)
+
+
+async def resolve_order_status(
+    ctx: ToolContext, customer_id: str, *, message: str = "", **_
+) -> ResolutionOutcome:
     order, outcome = await _handle_order_lookup(ctx, customer_id)
     if order:
         shipping = await order_tools.get_shipping_status(
@@ -95,6 +109,23 @@ async def resolve_order_status(ctx: ToolContext, customer_id: str, **_) -> Resol
             f"Carrier: {shipping.carrier or 'n/a'}, tracking: {shipping.tracking_number or 'n/a'}, "
             f"estimated delivery: {shipping.estimated_delivery or 'unknown'}."
         )
+        # spec: Phase 13 - "tracking shows delivered but I never got it" is a
+        # real discrepancy (a lost-package/potential-fraud case), not a
+        # routine status lookup - the system of record (this app's own order
+        # status, or a connected storefront's) says delivered while the
+        # customer disputes that. Escalate with the discrepancy stated
+        # plainly rather than just reporting "delivered" as if it settles
+        # the question; existing priority/sentiment classification (a
+        # separate axis, computed elsewhere in the graph) already picks up
+        # urgency/frustration cues from the message itself, so this only
+        # needs to set requires_human + a clear reason, not compute priority
+        # directly.
+        if order["status"] == "delivered" and _NEVER_ARRIVED_RE.search(message):
+            outcome.requires_human = True
+            outcome.escalation_reason = (
+                f"Customer disputes delivery: order {order['order_id']} shows 'delivered' but the "
+                "customer reports never receiving it - possible lost package, requires investigation."
+            )
     return outcome
 
 
@@ -480,6 +511,276 @@ async def resolve_password_reset(ctx: ToolContext, customer_id: str, **_) -> Res
     return outcome
 
 
+_MERGE_ACCOUNTS_RE = re.compile(
+    r"\bmerge\b.*\baccounts?\b|\btwo accounts?\b|\bduplicate account\b|\bcombine\b.*\baccounts?\b", re.I
+)
+
+
+async def resolve_account_access(
+    ctx: ToolContext, customer_id: str, *, confirmed: bool, message: str = "", **_
+) -> ResolutionOutcome:
+    """spec: Phase 13 - ACCOUNT_ACCESS used to share resolve_password_reset
+    with PASSWORD_RESET verbatim, which always offered a password-reset
+    email regardless of `Customer.is_locked` - a locked-out customer got
+    generic "check your email" guidance with no acknowledgment that
+    anything different was happening, and no path to actually get unlocked.
+    Now: a merge-shaped request ("I have two accounts") is recognized and
+    escalated first - no safe automated way exists to verify identity
+    across two separate records. Otherwise checks is_locked; if not
+    locked, defers to the same password-reset flow as before (unchanged
+    behavior for the common case). If locked, proposes an unlock -
+    identity-modifying, so it is proposed (awaiting_approval), never
+    applied immediately - see pending_internal_call/
+    app.workflow.nodes.human_approval._execute_approved_internal_call.
+    """
+    outcome = ResolutionOutcome()
+    if _MERGE_ACCOUNTS_RE.search(message):
+        outcome.escalation_reason = (
+            "Account merge requests require manual identity verification by a team member"
+        )
+        return outcome
+
+    try:
+        profile = await customer_tools.get_customer_profile(
+            ctx, customer_tools.GetCustomerProfileArgs(customer_id=customer_id)
+        )
+    except ToolError as exc:
+        outcome.errors.append({"code": exc.code, "message": exc.message})
+        outcome.facts.append("I could not look up your account due to a system error.")
+        return outcome
+    outcome.tool_calls.append({"tool": "get_customer_profile", "args": {"customer_id": customer_id}})
+    outcome.tool_results.append({"tool": "get_customer_profile", "result": profile.model_dump()})
+
+    if not profile.is_locked:
+        return await resolve_password_reset(ctx, customer_id)
+
+    if not confirmed:
+        outcome.pending_confirmation = True
+        outcome.facts.append(
+            "Your account is currently locked. Please confirm you would like it unlocked, and a "
+            "team member will review and complete the request."
+        )
+        return outcome
+
+    outcome.awaiting_approval = True
+    outcome.pending_internal_call = {"tool": "unlock_account", "args": {"customer_id": customer_id}}
+    outcome.facts.append(
+        "An account-unlock request has been submitted and is pending approval by a team member."
+    )
+    return outcome
+
+
+_EMAIL_TARGET_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+_NAME_TARGET_RE = re.compile(
+    r"\bname\s+(?:to|is)\s+([A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*)?)", re.I
+)
+
+
+def extract_profile_update_target(raw_message: str) -> dict[str, str]:
+    """spec: Phase 13 - MUST run on the RAW (pre-redaction) message, not
+    the redacted one resolve_issue normally passes to resolvers. A new
+    target email is exactly the kind of thing app.security.pii.redact
+    strips before resolvers ever see it (the same class of problem
+    app.agents.external_tools._substitute_known_placeholders already fixed
+    once this session for external-tool arguments) - unlike that fix,
+    there is no "known value on file" to substitute back here, since the
+    whole point is a DIFFERENT email than what's on file. Called from
+    app.workflow.nodes.resolve_issue before redaction happens, and the
+    extracted values are the only thing derived from the raw message that
+    is allowed to flow further (never the raw message itself)."""
+    target: dict[str, str] = {}
+    email_match = _EMAIL_TARGET_RE.search(raw_message)
+    if email_match:
+        target["new_email"] = email_match.group(0)
+    name_match = _NAME_TARGET_RE.search(raw_message)
+    if name_match:
+        target["new_full_name"] = name_match.group(1).strip()
+    return target
+
+
+async def resolve_profile_update(
+    ctx: ToolContext,
+    customer_id: str,
+    *,
+    confirmed: bool,
+    profile_update_target: dict[str, str] | None = None,
+    **_,
+) -> ResolutionOutcome:
+    """spec: Phase 13 - name/email change. `profile_update_target` (the
+    new value(s), extracted from the RAW message before PII redaction -
+    see extract_profile_update_target) is required to do anything useful;
+    its absence (e.g. a message like "I want to update my profile" with no
+    concrete new value stated) is a real, honest degradation, not a crash.
+    Always proposed (awaiting_approval), never applied immediately -
+    identity-modifying, ApprovalLevel.ALWAYS."""
+    outcome = ResolutionOutcome()
+    target = profile_update_target or {}
+    if not target:
+        outcome.escalation_reason = (
+            "Customer requested a profile update but did not state a new email or name"
+        )
+        return outcome
+
+    if not confirmed:
+        outcome.pending_confirmation = True
+        changes = ", ".join(f"{k.removeprefix('new_')}: {v}" for k, v in target.items())
+        outcome.facts.append(f"Please confirm you would like to update your profile ({changes}).")
+        return outcome
+
+    outcome.awaiting_approval = True
+    outcome.pending_internal_call = {
+        "tool": "update_customer_profile",
+        "args": {"customer_id": customer_id, **target},
+    }
+    changes = ", ".join(f"{k.removeprefix('new_')}: {v}" for k, v in target.items())
+    outcome.facts.append(
+        f"A profile update ({changes}) has been submitted and is pending approval by a team member."
+    )
+    return outcome
+
+
+_DUPLICATE_CHARGE_RE = re.compile(
+    r"\bcharged (me )?twice\b|\bdouble[- ]?charged?\b|\bduplicate charge\b|\bbilled twice\b", re.I
+)
+_PAYMENT_METHOD_UPDATE_RE = re.compile(
+    r"\b(update|change|add)\b.*\bpayment method\b|\bpayment method\b.*\b(update|change)\b|"
+    r"\bupdate\b.*\b(card|credit card)\b", re.I
+)
+_GIFT_CARD_RE = re.compile(r"\bgift card\b|\bstore credit\b", re.I)
+
+
+async def _resolve_duplicate_charge(
+    ctx: ToolContext, customer_id: str, *, confirmed: bool, conversation_id: str, message_id: str
+) -> ResolutionOutcome:
+    """spec: Phase 13 - real backing data exists (Payment rows), unlike
+    gift cards/promo codes. Looks for >=2 'succeeded' payments on the
+    customer's most recent order; if found, proposes refunding the extra
+    charge(s) via the EXISTING create_refund_request tool (reused, not
+    reinvented) - same ALWAYS/ALWAYS approval tier as any other refund."""
+    order, outcome = await _handle_order_lookup(ctx, customer_id)
+    if not order:
+        outcome.facts.append("I could not find a recent order to check for a duplicate charge.")
+        return outcome
+
+    payments_result = await payment_tools.list_payments_for_order(
+        ctx, payment_tools.ListPaymentsForOrderArgs(customer_id=customer_id, order_id=order["order_id"])
+    )
+    outcome.tool_calls.append({"tool": "list_payments_for_order", "args": {"order_id": order["order_id"]}})
+    outcome.tool_results.append({"tool": "list_payments_for_order", "result": payments_result.model_dump()})
+    succeeded = [p for p in payments_result.payments if p.status == "succeeded"]
+    if len(succeeded) < 2:
+        outcome.facts.append(
+            f"I checked payments for order {order['order_id']} and found no duplicate charge - "
+            f"{len(succeeded)} successful payment(s) on record."
+        )
+        return outcome
+
+    duplicate_amount = succeeded[-1].amount
+    if not confirmed:
+        outcome.pending_confirmation = True
+        outcome.facts.append(
+            f"I found {len(succeeded)} successful payments of {duplicate_amount} {order['currency']} for "
+            f"order {order['order_id']} - this looks like a duplicate charge. Please confirm you would "
+            "like a refund of the duplicate amount."
+        )
+        return outcome
+
+    try:
+        idempotency_key = build_idempotency_key(conversation_id, "duplicate_charge_refund", message_id)
+        result = await refund_tools.create_refund_request(
+            ctx,
+            refund_tools.CreateRefundRequestArgs(
+                customer_id=customer_id,
+                order_id=order["order_id"],
+                amount=duplicate_amount,
+                reason="Duplicate charge dispute",
+                idempotency_key=idempotency_key,
+                customer_confirmed=True,
+            ),
+        )
+        outcome.tool_calls.append({"tool": "create_refund_request", "args": {"order_id": order["order_id"]}})
+        outcome.tool_results.append({"tool": "create_refund_request", "result": result.model_dump()})
+        outcome.awaiting_approval = True
+        outcome.facts.append(
+            f"A refund of the duplicate charge ({result.amount}) has been created (status: "
+            f"{result.status}) and is pending human approval."
+        )
+    except ToolError as exc:
+        outcome.errors.append({"code": exc.code, "message": exc.message})
+        outcome.facts.append("I was unable to create the refund request due to a system error.")
+    return outcome
+
+
+async def resolve_billing(
+    ctx: ToolContext,
+    customer_id: str,
+    *,
+    confirmed: bool,
+    message: str = "",
+    conversation_id: str = "",
+    message_id: str = "",
+    llm: LLMProvider | None = None,
+    retrieved_documents: list[RetrievedDocument] | None = None,
+    **_,
+) -> ResolutionOutcome:
+    """spec: Phase 13 - BILLING previously had no INTENT_RESOLVERS entry at
+    all and always fell through to resolve_from_knowledge (RAG). This adds
+    real handling for the two sub-cases with real backing data/policy
+    (duplicate charge, payment method changes) while preserving the exact
+    prior RAG-fallback behavior for everything else (invoices, general
+    billing questions, gift cards with no real backing system, promo
+    codes) - a request this resolver doesn't specifically recognize is
+    never silently dropped, it degrades to exactly what BILLING did
+    before this phase."""
+    if _PAYMENT_METHOD_UPDATE_RE.search(message):
+        outcome = ResolutionOutcome()
+        outcome.facts.append(
+            "For your security, payment method changes must be made through the secure account "
+            "settings page - I'm not able to accept or store card details in chat."
+        )
+        return outcome
+    if _GIFT_CARD_RE.search(message):
+        outcome = ResolutionOutcome()
+        outcome.escalation_reason = (
+            "Gift card / store credit request requires manual handling by the billing team"
+        )
+        return outcome
+    if _DUPLICATE_CHARGE_RE.search(message):
+        return await _resolve_duplicate_charge(
+            ctx, customer_id, confirmed=confirmed, conversation_id=conversation_id, message_id=message_id
+        )
+    return await resolve_from_knowledge(retrieved_documents or [], ctx=ctx, llm=llm, message=message)
+
+
+_BULK_ORDER_RE = re.compile(r"\bbulk\b|\bwholesale\b|\blarge quantity\b|\bbuy \d{2,}\b", re.I)
+
+
+async def resolve_product_information(
+    ctx: ToolContext,
+    customer_id: str,
+    *,
+    message: str = "",
+    llm: LLMProvider | None = None,
+    retrieved_documents: list[RetrievedDocument] | None = None,
+    **_,
+) -> ResolutionOutcome:
+    """spec: Phase 13 - PRODUCT_INFORMATION previously had no
+    INTENT_RESOLVERS entry, always falling to RAG. A bulk/wholesale
+    inquiry has no real backing sales system in this app - recognized and
+    escalated to a clearly-categorized reason rather than answered from a
+    generic product FAQ. Real-time stock/availability was investigated
+    (spec: Phase 13 audit) and found NOT to be exposed by either connected
+    storefront's operation catalog (Acme Store: only trackOrder; Demo
+    Storefront: order/subscription/payment operations only, no
+    product/inventory endpoint) - deliberately NOT built here, stays
+    RAG-only, matching what PRODUCT_INFORMATION already did."""
+    if _BULK_ORDER_RE.search(message):
+        outcome = ResolutionOutcome()
+        outcome.escalation_reason = "Bulk/wholesale purchase inquiry - route to sales"
+        return outcome
+    return await resolve_from_knowledge(retrieved_documents or [], ctx=ctx, llm=llm, message=message)
+
+
 async def resolve_from_knowledge(
     retrieved_documents: list[RetrievedDocument],
     *,
@@ -543,7 +844,13 @@ INTENT_RESOLVERS: dict[str, Callable[..., Awaitable[ResolutionOutcome]]] = {
     "PAYMENT_FAILURE": resolve_payment_failure,
     "SUBSCRIPTION": resolve_subscription,
     "PASSWORD_RESET": resolve_password_reset,
-    "ACCOUNT_ACCESS": resolve_password_reset,
+    # spec: Phase 13 - ACCOUNT_ACCESS split off from sharing
+    # resolve_password_reset with PASSWORD_RESET (see resolve_account_access's
+    # docstring for why).
+    "ACCOUNT_ACCESS": resolve_account_access,
+    "PROFILE_UPDATE": resolve_profile_update,
+    "BILLING": resolve_billing,
+    "PRODUCT_INFORMATION": resolve_product_information,
     # spec: Phase 8.3 - EXCHANGE deliberately has NO entry here (see
     # COMMERCE_INTENTS's comment below) - it only ever resolves via a
     # connected storefront.
@@ -570,7 +877,13 @@ COMMERCE_INTENTS = {
 }
 
 KNOWLEDGE_INTENTS = {
-    "BILLING", "PRODUCT_INFORMATION", "TECHNICAL_SUPPORT", "SUBSCRIPTION", "SHIPPING", "RETURNS",
+    # spec: Phase 13 - BILLING/PRODUCT_INFORMATION removed from this set:
+    # both now have a real INTENT_RESOLVERS entry (resolve_billing/
+    # resolve_product_information), found first in gather_resolution_facts,
+    # so their membership here was already dead/unreachable - removed for
+    # clarity, not a behavior change (each resolver still falls back to
+    # resolve_from_knowledge internally for the cases it doesn't special-case).
+    "TECHNICAL_SUPPORT", "SUBSCRIPTION", "SHIPPING", "RETURNS",
     # EXCHANGE has no INTENT_RESOLVERS entry - a storefront-less tenant
     # falls through to here, getting a real "no reliable knowledge found"
     # escalation (resolve_from_knowledge) instead of a silent no-op.
@@ -842,6 +1155,7 @@ async def gather_resolution_facts(
     retrieved_documents: list[RetrievedDocument],
     llm: LLMProvider | None = None,
     retriever: Retriever | None = None,
+    profile_update_target: dict[str, str] | None = None,
 ) -> ResolutionOutcome:
     if intent in COMMERCE_INTENTS and llm is not None:
         storefront = await _get_storefront_integration(ctx)
@@ -863,6 +1177,8 @@ async def gather_resolution_facts(
             history=history,
             llm=llm,
             retriever=retriever,
+            retrieved_documents=retrieved_documents,
+            profile_update_target=profile_update_target,
         )
     if intent in KNOWLEDGE_INTENTS or intent == "UNKNOWN":
         return await resolve_from_knowledge(retrieved_documents, ctx=ctx, llm=llm, message=message)

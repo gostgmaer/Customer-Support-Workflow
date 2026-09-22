@@ -75,6 +75,12 @@ class SupportState(TypedDict, total=False):
     # backward-compatibility with any run already interrupted at deploy
     # time - its dict contents carry a `source` key instead.
     pending_mcp_call: dict[str, Any] | None
+    # spec: Phase 13 - analogous to pending_mcp_call but for an internal,
+    # reviewed-code tool that still must not run until a human approves it
+    # (update_customer_profile, unlock_account - identity-modifying, always
+    # human-approved per app.config.policies). {"tool": str, "args": dict}.
+    # None for every other awaiting_approval case.
+    pending_internal_call: dict[str, Any] | None
     # spec: Phase 8.2 - the raw result (or {"error": str} on failure) of
     # an approved external-tool call, set by
     # app.workflow.nodes.human_approval._execute_approved_external_call

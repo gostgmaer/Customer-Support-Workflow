@@ -27,6 +27,7 @@ approval - never speculatively.
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from jsonschema import ValidationError as JsonSchemaValidationError
@@ -34,7 +35,7 @@ from jsonschema import validate as jsonschema_validate
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
-from app.domain.exceptions import IntegrationError
+from app.domain.exceptions import IntegrationError, ToolError
 from app.integrations.mcp_client import call_tool as mcp_call_tool
 from app.integrations.openapi_client import OpenApiOperationSpec
 from app.integrations.openapi_client import call_operation as openapi_call_operation
@@ -42,7 +43,8 @@ from app.integrations.stripe import StripeClient
 from app.observability.logging import get_logger
 from app.repositories.integrations import IntegrationRepository
 from app.repositories.orders import PaymentRepository, RefundRepository
-from app.tools.base import record_external_tool_execution
+from app.tools import customer as customer_tools
+from app.tools.base import ToolContext, record_external_tool_execution
 from app.workflow.deps import get_deps
 from app.workflow.state import SupportState
 
@@ -141,8 +143,15 @@ async def human_approval_gate(state: SupportState, config: RunnableConfig) -> di
         return {"approved": True}
 
     pending_mcp = state.get("pending_mcp_call")
+    pending_internal = state.get("pending_internal_call")
     payload = {
-        "type": "mcp_tool_approval" if pending_mcp else "refund_approval",
+        "type": (
+            "mcp_tool_approval"
+            if pending_mcp
+            else "internal_action_approval"
+            if pending_internal
+            else "refund_approval"
+        ),
         "conversation_id": state["conversation_id"],
         "customer_id": state["customer_id"],
         "intent": state.get("intent"),
@@ -152,6 +161,9 @@ async def human_approval_gate(state: SupportState, config: RunnableConfig) -> di
         payload["integration_name"] = pending_mcp["integration_name"]
         payload["tool_name"] = pending_mcp["tool_name"]
         payload["arguments"] = pending_mcp["arguments"]
+    elif pending_internal:
+        payload["tool_name"] = pending_internal["tool"]
+        payload["arguments"] = pending_internal["args"]
 
     decision = interrupt(payload)
     approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
@@ -164,20 +176,90 @@ async def human_approval_gate(state: SupportState, config: RunnableConfig) -> di
     update: dict = {"awaiting_approval": False, "approved": approved}
     if not approved:
         update["requires_human"] = True
-        update["escalation_reason"] = state.get("escalation_reason") or (
-            "External tool call rejected by human approver; needs manual follow-up"
-            if pending_mcp
-            else "Refund rejected by human approver; needs manual follow-up"
-        )
-        if not pending_mcp:
+        if pending_mcp:
+            default_reason = "External tool call rejected by human approver; needs manual follow-up"
+        elif pending_internal:
+            default_reason = "Account action rejected by human approver; needs manual follow-up"
+        else:
+            default_reason = "Refund rejected by human approver; needs manual follow-up"
+        update["escalation_reason"] = state.get("escalation_reason") or default_reason
+        if not pending_mcp and not pending_internal:
             await _update_refund_status_after_decision(state, config, approved=False)
         return update
 
     if pending_mcp:
         update.update(await _execute_approved_external_call(state, config, pending_mcp, arguments_override))
+    elif pending_internal:
+        update.update(await _execute_approved_internal_call(state, config, pending_internal))
     else:
         update.update(await _update_refund_status_after_decision(state, config, approved=True))
     return update
+
+
+# spec: Phase 13 - the internal-tool analogue of _call_external_tool below.
+# Only these two tools ever populate pending_internal_call (see
+# app.agents.resolution's resolve_profile_update/resolve_account_access) -
+# both identity-modifying, both ApprovalLevel.ALWAYS in
+# app.config.policies.TOOL_PERMISSION_MATRIX.
+_InternalToolFn = Callable[[ToolContext, Any], Awaitable[Any]]
+_INTERNAL_TOOL_DISPATCH: dict[str, tuple[_InternalToolFn, type[Any]]] = {
+    "update_customer_profile": (
+        customer_tools.update_customer_profile,
+        customer_tools.UpdateCustomerProfileArgs,
+    ),
+    "unlock_account": (customer_tools.unlock_account, customer_tools.UnlockAccountArgs),
+}
+
+
+async def _execute_approved_internal_call(
+    state: SupportState, config: RunnableConfig, pending_internal: dict
+) -> dict:
+    """Mirrors _execute_approved_external_call's shape but for a reviewed,
+    built-in tool that was deliberately NOT run during resolve_issue (spec:
+    Phase 13) - update_customer_profile/unlock_account are identity-
+    modifying and must not take effect before a human approves, unlike
+    e.g. cancel_order (ApprovalLevel.SOMETIMES, runs immediately and is
+    only sometimes flagged for post-hoc review)."""
+    deps = get_deps(config)
+    tool_name = pending_internal["tool"]
+    dispatch = _INTERNAL_TOOL_DISPATCH.get(tool_name)
+    facts = list(state.get("resolution_facts", []))
+    if dispatch is None:
+        facts.append(f"Could not complete '{tool_name}': unknown internal action.")
+        return {
+            "requires_human": True,
+            "escalation_reason": f"Unknown pending internal action '{tool_name}' after approval",
+            "resolution_facts": facts,
+            "draft_response": "I attempted to make that change, but it failed. A team member will follow up.",
+            "execution_result": {"error": f"unknown internal action '{tool_name}'"},
+        }
+    fn, args_model = dispatch
+    ctx = ToolContext(
+        session=deps.session,
+        requesting_customer_id=state["customer_id"],
+        workflow_run_id=state.get("workflow_run_id", ""),
+        tenant_id=state["tenant_id"],
+    )
+    try:
+        args = args_model(**pending_internal["args"], customer_confirmed=True)
+        result = await fn(ctx, args)
+    except ToolError as exc:
+        logger.warning("internal_action_approved_call_failed", tool=tool_name, error=str(exc))
+        facts.append(f"The requested account change ('{tool_name}') failed: {exc}")
+        return {
+            "requires_human": True,
+            "escalation_reason": f"Internal action failed after approval: {exc}",
+            "resolution_facts": facts,
+            "draft_response": "I attempted to make that change, but it failed. A team member will follow up.",
+            "execution_result": {"error": str(exc)},
+        }
+    logger.info("internal_action_approved_call_succeeded", tool=tool_name, customer_id=state["customer_id"])
+    facts.append(f"Completed: {tool_name}.")
+    return {
+        "resolution_facts": facts,
+        "draft_response": "Your requested account change has been completed.",
+        "execution_result": result.model_dump(),
+    }
 
 
 async def _call_external_tool(integration: Any, pending_mcp: dict) -> dict[str, Any]:

@@ -35,6 +35,16 @@ class PaymentRepository(TenantScopedRepository):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_for_order(self, order_id: str) -> list[Payment]:
+        """spec: Phase 13 - duplicate-charge detection (app.agents.resolution's
+        billing resolver) needs every payment on an order, not just the
+        latest one `get_latest_for_order` returns."""
+        stmt = self._scope(
+            select(Payment).where(Payment.order_id == order_id).order_by(Payment.created_at.asc()), Payment
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_by_gateway_payment_intent_id(self, payment_intent_id: str) -> Payment | None:
         """spec: Phase 9.4b - how the Stripe webhook route
         (app.api.routes.webhooks) finds which Payment row a

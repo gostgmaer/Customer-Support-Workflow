@@ -24,6 +24,11 @@ _CONFIRM_NO_RE = re.compile(r"\b(no|don'?t|cancel that|never mind|nevermind|stop
 CONFIRMATION_CAPABLE_INTENTS = {
     "ORDER_CANCEL", "REFUND", "RETURNS", "SUBSCRIPTION",
     "SUBSCRIPTION_CHANGE", "ADDRESS_CHANGE", "PAYMENT_RETRY",
+    # spec: Phase 13 - PROFILE_UPDATE/ACCOUNT_ACCESS (account unlock) both
+    # gained a pending_confirmation step (resolve_profile_update/
+    # resolve_account_access); BILLING's duplicate-charge sub-case
+    # (_resolve_duplicate_charge) also does.
+    "PROFILE_UPDATE", "ACCOUNT_ACCESS", "BILLING",
 }
 
 

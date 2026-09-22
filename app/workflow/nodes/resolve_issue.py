@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.runnables import RunnableConfig
 
-from app.agents.resolution import draft_response, gather_resolution_facts
+from app.agents.resolution import draft_response, extract_profile_update_target, gather_resolution_facts
 from app.rag.retriever import RetrievedDocument
 from app.security.pii import redact
 from app.tools.base import ToolContext
@@ -18,7 +18,14 @@ async def resolve_issue(state: SupportState, config: RunnableConfig) -> dict:
     deps = get_deps(config)
     llm = deps.llm_router.get_model("resolution_response")
     intent = (state.get("intent") or "UNKNOWN")
-    message = redact(state["latest_message"])
+    raw_message = state["latest_message"]
+    message = redact(raw_message)
+    # spec: Phase 13 - a new target email is exactly the kind of thing
+    # redact() strips before any resolver sees it (see
+    # app.agents.resolution.extract_profile_update_target's docstring) -
+    # extracted from the RAW message here, at the one point it's still
+    # available, and never passed further as the raw message itself.
+    profile_update_target = extract_profile_update_target(raw_message) if intent == "PROFILE_UPDATE" else None
 
     if intent in _SENSITIVE_INTENTS:
         # Never call customer-data tools for these - the human agent
@@ -59,6 +66,7 @@ async def resolve_issue(state: SupportState, config: RunnableConfig) -> dict:
         retrieved_documents=retrieved_documents,
         llm=llm,
         retriever=deps.retriever,
+        profile_update_target=profile_update_target,
     )
 
     response = await draft_response(llm, message=message, facts=outcome.facts)
@@ -77,4 +85,5 @@ async def resolve_issue(state: SupportState, config: RunnableConfig) -> dict:
         update["requires_human"] = True
     update["awaiting_approval"] = outcome.awaiting_approval
     update["pending_mcp_call"] = outcome.pending_mcp_call
+    update["pending_internal_call"] = outcome.pending_internal_call
     return update

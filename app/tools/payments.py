@@ -51,6 +51,52 @@ async def get_payment_status(ctx: ToolContext, args: GetPaymentStatusArgs) -> Pa
     )
 
 
+class ListPaymentsForOrderArgs(BaseModel):
+    customer_id: str
+    order_id: str
+
+
+class PaymentRecord(BaseModel):
+    payment_id: str
+    status: str
+    amount: float
+    created_at: str
+
+
+class ListPaymentsForOrderResult(BaseModel):
+    order_id: str
+    payments: list[PaymentRecord]
+
+
+async def list_payments_for_order(
+    ctx: ToolContext, args: ListPaymentsForOrderArgs
+) -> ListPaymentsForOrderResult:
+    """spec: Phase 13 - duplicate/incorrect-charge dispute resolver needs
+    every payment on an order (not just the latest), read-only."""
+
+    async def _run() -> ListPaymentsForOrderResult:
+        repo = PaymentRepository(ctx.session, ctx.tenant_id)
+        payments = await repo.list_for_order(args.order_id)
+        payments = [p for p in payments if p.customer_id == args.customer_id]
+        return ListPaymentsForOrderResult(
+            order_id=args.order_id,
+            payments=[
+                PaymentRecord(
+                    payment_id=p.id, status=p.status, amount=p.amount, created_at=p.created_at.isoformat()
+                )
+                for p in payments
+            ],
+        )
+
+    return await run_tool(
+        ctx=ctx,
+        tool_name="list_payments_for_order",
+        target_customer_id=args.customer_id,
+        args=args,
+        fn=_run,
+    )
+
+
 class RetryPaymentArgs(BaseModel):
     customer_id: str
     order_id: str
