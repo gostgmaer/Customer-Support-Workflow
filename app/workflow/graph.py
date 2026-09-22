@@ -64,6 +64,38 @@ Node = Callable[[SupportState, RunnableConfig], Awaitable[dict]]
 # app.llm.base.LLMProvider. Every other node is deterministic Python and
 # never touches deps.llm_router, so cost tracking/budget checks only need
 # to wrap these.
+# Which keys of a node's returned state-update dict are worth persisting
+# onto its WorkflowEvent row (spec §22/§27's "make every important
+# workflow decision observable") - a curated, decision-relevant subset,
+# not the full dict: `tool_results`/`execution_result`/full response text
+# either duplicate what `tool_executions`/`support_tickets` already store
+# durably, or carry customer-message-length text that doesn't belong
+# replicated onto every node's trace row. This is what actually turns
+# `workflow_events` from a timing-only table into a real "what did the
+# agent decide, at each step" audit trail - previously defined
+# (`WorkflowEvent.data`) but never once populated.
+_TRACKED_EVENT_KEYS = (
+    "intent",
+    "intent_confidence",
+    "priority",
+    "sentiment",
+    "route",
+    "tool_calls",
+    "requires_human",
+    "escalation_reason",
+    "awaiting_approval",
+    "grounded",
+    "response_confidence",
+    "policy_violations",
+    "review_issues",
+    "regenerate_count",
+)
+
+
+def _event_data(result: dict) -> dict:
+    return {key: result[key] for key in _TRACKED_EVENT_KEYS if key in result}
+
+
 LLM_CALLING_NODES = {
     "classify_intent",
     "classify_priority",
@@ -183,6 +215,7 @@ async def _run_and_log(
                 node_name=node_name,
                 status="succeeded",
                 duration_ms=(time.perf_counter() - start) * 1000,
+                data=_event_data(result),
             )
         )
         await deps.session.commit()

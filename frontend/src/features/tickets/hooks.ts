@@ -6,6 +6,7 @@ import {
   approveTicket,
   createJiraIssueForTicket,
   getTicket,
+  getTicketTrace,
   listTickets,
   lookupWooCommerceOrder,
   rejectTicket,
@@ -23,6 +24,14 @@ export function useTicket(ticketId: string) {
   return useQuery({
     queryKey: ["ticket", ticketId],
     queryFn: () => getTicket(ticketId),
+  });
+}
+
+export function useTicketTrace(ticketId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["ticket-trace", ticketId],
+    queryFn: () => getTicketTrace(ticketId),
+    enabled,
   });
 }
 

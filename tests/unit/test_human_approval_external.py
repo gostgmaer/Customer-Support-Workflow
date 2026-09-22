@@ -102,10 +102,17 @@ def _fake_config(db_session) -> dict:
     return {"configurable": {"deps": deps}}
 
 
-_STATE = {"tenant_id": DEFAULT_TENANT_ID, "resolution_facts": ["existing fact"]}
+@pytest.fixture
+async def state(seeded_workflow_run) -> dict:
+    return {
+        "tenant_id": DEFAULT_TENANT_ID,
+        "customer_id": "cust_test",
+        "workflow_run_id": seeded_workflow_run["workflow_run_id"],
+        "resolution_facts": ["existing fact"],
+    }
 
 
-async def test_executes_the_mcp_tool_and_appends_a_grounded_fact(db_session, mcp_server_url):
+async def test_executes_the_mcp_tool_and_appends_a_grounded_fact(db_session, mcp_server_url, state):
     integration = await _add_mcp_integration(db_session, mcp_server_url)
     pending = {
         "integration_id": integration.id,
@@ -115,7 +122,7 @@ async def test_executes_the_mcp_tool_and_appends_a_grounded_fact(db_session, mcp
         "arguments": {"subscription_id": "sub_1"},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert "requires_human" not in result
     assert "Cancelled sub_1" in result["resolution_facts"][-1]
@@ -123,7 +130,7 @@ async def test_executes_the_mcp_tool_and_appends_a_grounded_fact(db_session, mcp
     assert "Cancelled sub_1" in result["draft_response"]
 
 
-async def test_mcp_tool_failure_escalates_instead_of_raising(db_session, mcp_server_url):
+async def test_mcp_tool_failure_escalates_instead_of_raising(db_session, mcp_server_url, state):
     integration = await _add_mcp_integration(db_session, mcp_server_url)
     pending = {
         "integration_id": integration.id,
@@ -133,13 +140,13 @@ async def test_mcp_tool_failure_escalates_instead_of_raising(db_session, mcp_ser
         "arguments": {},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert result["requires_human"] is True
     assert "failed" in result["escalation_reason"].lower()
 
 
-async def test_disabled_integration_escalates(db_session, mcp_server_url):
+async def test_disabled_integration_escalates(db_session, mcp_server_url, state):
     integration = await _add_mcp_integration(db_session, mcp_server_url, enabled=False)
     pending = {
         "integration_id": integration.id,
@@ -149,14 +156,14 @@ async def test_disabled_integration_escalates(db_session, mcp_server_url):
         "arguments": {"subscription_id": "sub_1"},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert result["requires_human"] is True
     assert "removed or disabled" in result["escalation_reason"].lower()
     assert "no longer available" in result["draft_response"].lower()
 
 
-async def test_deleted_integration_escalates(db_session, mcp_server_url):
+async def test_deleted_integration_escalates(db_session, mcp_server_url, state):
     pending = {
         "integration_id": "does-not-exist",
         "integration_name": "Ghost Integration",
@@ -165,13 +172,13 @@ async def test_deleted_integration_escalates(db_session, mcp_server_url):
         "arguments": {"subscription_id": "sub_1"},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert result["requires_human"] is True
 
 
 @respx.mock
-async def test_executes_the_openapi_operation_and_appends_a_grounded_fact(db_session):
+async def test_executes_the_openapi_operation_and_appends_a_grounded_fact(db_session, state):
     integration = await _add_openapi_integration(db_session)
     respx.post("https://storefront.example.com/orders/order_1001/cancel").mock(
         return_value=Response(200, json={"status": "cancelled", "orderId": "order_1001"})
@@ -187,7 +194,7 @@ async def test_executes_the_openapi_operation_and_appends_a_grounded_fact(db_ses
         "param_locations": {"orderId": "path"},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert "requires_human" not in result
     assert "cancelled" in result["resolution_facts"][-1]
@@ -195,7 +202,7 @@ async def test_executes_the_openapi_operation_and_appends_a_grounded_fact(db_ses
 
 
 @respx.mock
-async def test_openapi_failure_reopens_and_escalates_at_source_agnostic_path(db_session):
+async def test_openapi_failure_reopens_and_escalates_at_source_agnostic_path(db_session, state):
     # Regression test: the exact bug already fixed this session for MCP
     # (a failed approved action silently reading "resolved") must not
     # reappear for the OpenAPI source - app.workflow.runner.resume_workflow
@@ -217,13 +224,13 @@ async def test_openapi_failure_reopens_and_escalates_at_source_agnostic_path(db_
         "param_locations": {"orderId": "path"},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert result["requires_human"] is True
     assert "failed" in result["escalation_reason"].lower()
 
 
-async def test_openapi_disabled_integration_escalates(db_session):
+async def test_openapi_disabled_integration_escalates(db_session, state):
     integration = await _add_openapi_integration(db_session, enabled=False)
     pending = {
         "integration_id": integration.id,
@@ -236,13 +243,13 @@ async def test_openapi_disabled_integration_escalates(db_session):
         "param_locations": {"orderId": "path"},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert result["requires_human"] is True
     assert "removed or disabled" in result["escalation_reason"].lower()
 
 
-async def test_missing_source_key_defaults_to_mcp(db_session, mcp_server_url):
+async def test_missing_source_key_defaults_to_mcp(db_session, mcp_server_url, state):
     # Backward-compatibility: a workflow run interrupted before the
     # `source` key existed (pre-Phase-7) must still resume correctly.
     integration = await _add_mcp_integration(db_session, mcp_server_url)
@@ -254,7 +261,7 @@ async def test_missing_source_key_defaults_to_mcp(db_session, mcp_server_url):
         # no "source" key
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert "requires_human" not in result
     assert "Cancelled sub_1" in result["draft_response"]
@@ -264,7 +271,7 @@ async def test_missing_source_key_defaults_to_mcp(db_session, mcp_server_url):
 
 
 @respx.mock
-async def test_argument_override_merges_into_proposed_arguments(db_session):
+async def test_argument_override_merges_into_proposed_arguments(db_session, state):
     integration = await _add_openapi_integration(db_session)
     route = respx.post("https://storefront.example.com/orders/order_9999/cancel").mock(
         return_value=Response(200, json={"status": "cancelled", "orderId": "order_9999"})
@@ -286,7 +293,7 @@ async def test_argument_override_merges_into_proposed_arguments(db_session):
     }
 
     result = await _execute_approved_external_call(
-        _STATE, _fake_config(db_session), pending, arguments_override={"orderId": "order_9999"}
+        state, _fake_config(db_session), pending, arguments_override={"orderId": "order_9999"}
     )
 
     assert "requires_human" not in result
@@ -297,7 +304,7 @@ async def test_argument_override_merges_into_proposed_arguments(db_session):
 
 
 @respx.mock
-async def test_argument_override_failing_schema_validation_escalates_without_calling(db_session):
+async def test_argument_override_failing_schema_validation_escalates_without_calling(db_session, state):
     integration = await _add_openapi_integration(db_session)
     route = respx.post("https://storefront.example.com/orders/order_1001/cancel").mock(
         return_value=Response(200, json={"status": "cancelled"})
@@ -322,7 +329,7 @@ async def test_argument_override_failing_schema_validation_escalates_without_cal
     # this must be rejected before any HTTP call is attempted, not just
     # at the original LLM-proposal stage.
     result = await _execute_approved_external_call(
-        _STATE, _fake_config(db_session), pending, arguments_override={"orderId": 12345}
+        state, _fake_config(db_session), pending, arguments_override={"orderId": 12345}
     )
 
     assert result["requires_human"] is True
@@ -330,7 +337,7 @@ async def test_argument_override_failing_schema_validation_escalates_without_cal
     assert not route.called
 
 
-async def test_no_override_leaves_proposed_arguments_unchanged(db_session, mcp_server_url):
+async def test_no_override_leaves_proposed_arguments_unchanged(db_session, mcp_server_url, state):
     integration = await _add_mcp_integration(db_session, mcp_server_url)
     pending = {
         "integration_id": integration.id,
@@ -341,7 +348,7 @@ async def test_no_override_leaves_proposed_arguments_unchanged(db_session, mcp_s
     }
 
     result = await _execute_approved_external_call(
-        _STATE, _fake_config(db_session), pending, arguments_override=None
+        state, _fake_config(db_session), pending, arguments_override=None
     )
 
     assert "requires_human" not in result
@@ -351,7 +358,7 @@ async def test_no_override_leaves_proposed_arguments_unchanged(db_session, mcp_s
 # --- Phase 8.2: execution_result persistence ---
 
 
-async def test_successful_mcp_call_returns_execution_result(db_session, mcp_server_url):
+async def test_successful_mcp_call_returns_execution_result(db_session, mcp_server_url, state):
     integration = await _add_mcp_integration(db_session, mcp_server_url)
     pending = {
         "integration_id": integration.id,
@@ -361,12 +368,12 @@ async def test_successful_mcp_call_returns_execution_result(db_session, mcp_serv
         "arguments": {"subscription_id": "sub_1"},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert result["execution_result"] == {"text": "Cancelled sub_1"}
 
 
-async def test_failed_mcp_call_returns_execution_result_with_error(db_session, mcp_server_url):
+async def test_failed_mcp_call_returns_execution_result_with_error(db_session, mcp_server_url, state):
     integration = await _add_mcp_integration(db_session, mcp_server_url)
     pending = {
         "integration_id": integration.id,
@@ -376,7 +383,7 @@ async def test_failed_mcp_call_returns_execution_result_with_error(db_session, m
         "arguments": {},
     }
 
-    result = await _execute_approved_external_call(_STATE, _fake_config(db_session), pending)
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
 
     assert result["requires_human"] is True
     assert "error" in result["execution_result"]

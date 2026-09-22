@@ -105,6 +105,30 @@ export interface SupportTicket {
   created_at: string;
 }
 
+export interface WorkflowEventEntry {
+  node_name: string;
+  status: string;
+  duration_ms: number | null;
+  error_code: string | null;
+  data: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ToolExecutionEntry {
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  result_summary: Record<string, unknown>;
+  success: boolean;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export interface TicketTrace {
+  workflow_run_id: string;
+  events: WorkflowEventEntry[];
+  tool_executions: ToolExecutionEntry[];
+}
+
 export type IntegrationType = "jira" | "woocommerce" | "smtp" | "custom" | "mcp" | "openapi";
 export type IntegrationAuthType = "api_key" | "bearer" | "basic" | "none";
 

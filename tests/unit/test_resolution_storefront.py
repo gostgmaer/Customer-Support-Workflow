@@ -78,11 +78,11 @@ class _StubLLM:
         return self._selection
 
 
-async def _ctx(db_session) -> ToolContext:
+async def _ctx(db_session, *, workflow_run_id: str = "wf_1") -> ToolContext:
     return ToolContext(
         session=db_session,
         requesting_customer_id="cust_1",
-        workflow_run_id="wf_1",
+        workflow_run_id=workflow_run_id,
         tenant_id=DEFAULT_TENANT_ID,
     )
 
@@ -187,16 +187,16 @@ async def test_resolve_via_storefront_read_requires_approval_without_opt_in(db_s
 
 
 @respx.mock
-async def test_resolve_via_storefront_auto_executes_read_when_opted_in(db_session):
+async def test_resolve_via_storefront_auto_executes_read_when_opted_in(db_session, seeded_workflow_run):
     storefront = await _add_storefront(db_session, spec_cache=_STATUS_SPEC, auto_execute_reads=True)
     respx.get("https://storefront.example.com/orders/order_1001").mock(
         return_value=Response(200, json={"status": "shipped", "orderId": "order_1001"})
     )
-    ctx = await _ctx(db_session)
+    ctx = await _ctx(db_session, workflow_run_id=seeded_workflow_run["workflow_run_id"])
     selection = ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"})
 
     outcome = await resolve_via_storefront(
-        ctx, _StubLLM(selection), "where is my order", storefront, "conv_1"
+        ctx, _StubLLM(selection), "where is my order", storefront, seeded_workflow_run["conversation_id"]
     )
 
     assert outcome.awaiting_approval is False
@@ -205,14 +205,16 @@ async def test_resolve_via_storefront_auto_executes_read_when_opted_in(db_sessio
 
 
 @respx.mock
-async def test_resolve_via_storefront_auto_execute_failure_escalates_without_ticket(db_session):
+async def test_resolve_via_storefront_auto_execute_failure_escalates_without_ticket(
+    db_session, seeded_workflow_run
+):
     storefront = await _add_storefront(db_session, spec_cache=_STATUS_SPEC, auto_execute_reads=True)
     respx.get("https://storefront.example.com/orders/order_1001").mock(return_value=Response(500))
-    ctx = await _ctx(db_session)
+    ctx = await _ctx(db_session, workflow_run_id=seeded_workflow_run["workflow_run_id"])
     selection = ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"})
 
     outcome = await resolve_via_storefront(
-        ctx, _StubLLM(selection), "where is my order", storefront, "conv_1"
+        ctx, _StubLLM(selection), "where is my order", storefront, seeded_workflow_run["conversation_id"]
     )
 
     assert outcome.awaiting_approval is False
@@ -220,19 +222,21 @@ async def test_resolve_via_storefront_auto_execute_failure_escalates_without_tic
 
 
 @respx.mock
-async def test_gather_resolution_facts_routes_commerce_intent_to_storefront_when_connected(db_session):
+async def test_gather_resolution_facts_routes_commerce_intent_to_storefront_when_connected(
+    db_session, seeded_workflow_run
+):
     await _add_storefront(db_session, spec_cache=_STATUS_SPEC, auto_execute_reads=True)
     respx.get("https://storefront.example.com/orders/order_1001").mock(
         return_value=Response(200, json={"status": "shipped", "orderId": "order_1001"})
     )
-    ctx = await _ctx(db_session)
+    ctx = await _ctx(db_session, workflow_run_id=seeded_workflow_run["workflow_run_id"])
     selection = ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"})
 
     outcome = await gather_resolution_facts(
         ctx,
         intent="ORDER_STATUS",
         customer_id="cust_1",
-        conversation_id="conv_1",
+        conversation_id=seeded_workflow_run["conversation_id"],
         message_id="m1",
         message="where is my order",
         history=[],

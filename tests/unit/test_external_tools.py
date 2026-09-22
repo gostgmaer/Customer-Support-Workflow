@@ -347,3 +347,169 @@ async def test_mcp_entries_always_default_to_mutating(db_session, mcp_ctx, mcp_s
 
     assert len(catalog) == 1
     assert catalog[0].is_mutating is True
+
+
+# --- Phase 11 live-testing finding: PII-placeholder substitution ---
+# app.workflow.nodes.resolve_issue redacts the customer's message before
+# any LLM ever sees it, so the LLM can only ever propose the literal
+# placeholder (e.g. "<EMAIL_REDACTED>") for an argument like "email" - a
+# real external API verifying identity by order ID + email then rejects
+# the call outright (live-verified against a real connected backend).
+# propose_external_tool_call substitutes the real value from this app's
+# own Customer record afterward, so the LLM itself never sees raw PII.
+
+_EMAIL_SPEC = [
+    {
+        "operation_id": "trackOrder",
+        "method": "POST",
+        "path": "/orders/track",
+        "summary": "Look up an order by id and email",
+        "input_schema": {
+            "type": "object",
+            "properties": {"orderId": {"type": "string"}, "email": {"type": "string"}},
+            "required": ["orderId", "email"],
+        },
+        "param_locations": {"orderId": "body_field", "email": "body_field"},
+    }
+]
+
+
+async def test_substitutes_the_real_customer_email_for_the_redaction_placeholder(
+    db_session, seeded_customer
+):
+    await _add_enabled_openapi_integration(db_session, spec_cache=_EMAIL_SPEC)
+    ctx = ToolContext(
+        session=db_session,
+        requesting_customer_id=seeded_customer["customer_id"],
+        workflow_run_id="wf_1",
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    selection = ExternalToolSelection(
+        tool_index=0, arguments={"orderId": "ORD-1", "email": "<EMAIL_REDACTED>"}
+    )
+
+    proposal = await propose_external_tool_call(ctx, _StubLLM(selection), "where is my order")
+
+    assert proposal is not None
+    assert proposal.arguments["email"] == f"{seeded_customer['customer_id']}@example.com"
+    assert proposal.arguments["orderId"] == "ORD-1"
+
+
+async def test_leaves_a_non_placeholder_value_unchanged(db_session, seeded_customer):
+    await _add_enabled_openapi_integration(db_session, spec_cache=_EMAIL_SPEC)
+    ctx = ToolContext(
+        session=db_session,
+        requesting_customer_id=seeded_customer["customer_id"],
+        workflow_run_id="wf_1",
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    # The LLM occasionally sees a real value anyway (e.g. it was never
+    # redacted because the customer typed it differently than the regex
+    # expects) - substitution must never override a real, already-correct
+    # value with the account's own email.
+    selection = ExternalToolSelection(
+        tool_index=0, arguments={"orderId": "ORD-1", "email": "someone-else@example.com"}
+    )
+
+    proposal = await propose_external_tool_call(ctx, _StubLLM(selection), "where is my order")
+
+    assert proposal is not None
+    assert proposal.arguments["email"] == "someone-else@example.com"
+
+
+async def test_unknown_placeholder_is_left_as_is(db_session, seeded_customer):
+    # <PHONE_REDACTED> has no corresponding Customer field (this model
+    # doesn't store a phone number) - it must be left exactly as the LLM
+    # proposed it, not guessed at, so this fails validation/execution the
+    # same honest way it did before this fix existed.
+    spec = [
+        {
+            **_EMAIL_SPEC[0],
+            "input_schema": {
+                "type": "object",
+                "properties": {"orderId": {"type": "string"}, "phone": {"type": "string"}},
+                "required": ["orderId", "phone"],
+            },
+        }
+    ]
+    await _add_enabled_openapi_integration(db_session, spec_cache=spec)
+    ctx = ToolContext(
+        session=db_session,
+        requesting_customer_id=seeded_customer["customer_id"],
+        workflow_run_id="wf_1",
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    selection = ExternalToolSelection(
+        tool_index=0, arguments={"orderId": "ORD-1", "phone": "<PHONE_REDACTED>"}
+    )
+
+    proposal = await propose_external_tool_call(ctx, _StubLLM(selection), "where is my order")
+
+    assert proposal is not None
+    assert proposal.arguments["phone"] == "<PHONE_REDACTED>"
+
+
+async def test_substitutes_a_bare_redacted_value_using_the_argument_key(db_session, seeded_customer):
+    # Regression: live scenario testing caught the LLM collapsing
+    # "<EMAIL_REDACTED>" down to a bare "REDACTED" (no angle brackets, no
+    # type prefix) when the customer's message contained two emails (one
+    # a self-correction) - the original exact-string match missed this
+    # entirely and let the literal word "REDACTED" reach the real API.
+    await _add_enabled_openapi_integration(db_session, spec_cache=_EMAIL_SPEC)
+    ctx = ToolContext(
+        session=db_session,
+        requesting_customer_id=seeded_customer["customer_id"],
+        workflow_run_id="wf_1",
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    selection = ExternalToolSelection(tool_index=0, arguments={"orderId": "ORD-1", "email": "REDACTED"})
+
+    proposal = await propose_external_tool_call(ctx, _StubLLM(selection), "where is my order")
+
+    assert proposal is not None
+    assert proposal.arguments["email"] == f"{seeded_customer['customer_id']}@example.com"
+
+
+async def test_bare_redacted_for_an_unmapped_key_is_left_as_is(db_session, seeded_customer):
+    # The key-name fallback only covers a fixed, known vocabulary - a bare
+    # "REDACTED" for a field this app has no Customer attribute for (e.g.
+    # "phone") must not be guessed at either.
+    spec = [
+        {
+            **_EMAIL_SPEC[0],
+            "input_schema": {
+                "type": "object",
+                "properties": {"orderId": {"type": "string"}, "phone": {"type": "string"}},
+                "required": ["orderId", "phone"],
+            },
+        }
+    ]
+    await _add_enabled_openapi_integration(db_session, spec_cache=spec)
+    ctx = ToolContext(
+        session=db_session,
+        requesting_customer_id=seeded_customer["customer_id"],
+        workflow_run_id="wf_1",
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    selection = ExternalToolSelection(tool_index=0, arguments={"orderId": "ORD-1", "phone": "REDACTED"})
+
+    proposal = await propose_external_tool_call(ctx, _StubLLM(selection), "where is my order")
+
+    assert proposal is not None
+    assert proposal.arguments["phone"] == "REDACTED"
+
+
+async def test_no_db_lookup_when_no_placeholder_is_present(db_session, mcp_ctx):
+    # Fast path: a fabricated "cust_1" (mcp_ctx's own id, no real Customer
+    # row) must not blow up with a lookup failure when nothing needs
+    # substituting - proves the DB round-trip is genuinely skipped, not
+    # just coincidentally successful.
+    await _add_enabled_openapi_integration(db_session, spec_cache=_EMAIL_SPEC)
+    selection = ExternalToolSelection(
+        tool_index=0, arguments={"orderId": "ORD-1", "email": "real@example.com"}
+    )
+
+    proposal = await propose_external_tool_call(mcp_ctx, _StubLLM(selection), "where is my order")
+
+    assert proposal is not None
+    assert proposal.arguments["email"] == "real@example.com"

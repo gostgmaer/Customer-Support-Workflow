@@ -20,6 +20,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { useApproveTicket, useCreateJiraIssue, useRejectTicket } from "../hooks";
 import type { SupportTicket } from "@/types/api";
 
+import { AgentTracePanel } from "./AgentTracePanel";
 import { PendingCallPanel } from "./PendingCallPanel";
 import { RejectTicketDialog } from "./RejectTicketDialog";
 import { WooCommerceLookupPanel } from "./WooCommerceLookupPanel";
@@ -180,6 +181,8 @@ export function TicketDetail({ ticket }: { ticket: SupportTicket }) {
               </pre>
             </div>
           )}
+
+          <AgentTracePanel ticketId={ticket.id} hasWorkflowRun={!!ticket.workflow_run_id} />
         </div>
 
         <div className="space-y-4">

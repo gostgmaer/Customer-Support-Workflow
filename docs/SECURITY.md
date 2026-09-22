@@ -220,7 +220,11 @@ instance count`. See `tests/integration/test_rate_limit_api.py`.
 - `app.security.pii.redact` replaces email/phone/IP/card/SSN/token
   patterns with `<TYPE_REDACTED>` placeholders. It is applied to the
   customer message and conversation history before either reaches an LLM
-  prompt (`app.workflow.nodes.classify`, `app.workflow.nodes.load_conversation`).
+  prompt - independently, at each of the seven call sites that build a
+  prompt from customer-supplied text (`app.workflow.nodes.classify`,
+  `load_conversation`, `resolve_issue`, `regenerate`, `route_nodes`) -
+  rather than once at a single choke point, so a new prompt-building call
+  site must remember to redact itself too.
 - Card-like digit runs are Luhn-validated before being labeled `<CARD_REDACTED>`
   (see `_redact_cards`) - a plain "13-19 digits" regex would also flag
   order/tracking numbers, which makes the redaction noisy enough that a
@@ -228,21 +232,53 @@ instance count`. See `tests/integration/test_rate_limit_api.py`.
   still get redacted as a possible phone number (the safe default), but is
   never mislabeled as a validated card.
 - Tool arguments/results are redacted (`redact_dict`) before being written
-  to the `tool_executions` audit table (`app.tools.base.run_tool`).
+  to the `tool_executions` audit table, for both internal tools
+  (`app.tools.base.run_tool`) and external MCP/OpenAPI calls
+  (`app.tools.base.record_external_tool_execution`, spec: Phase 11 -
+  previously only internal tool calls were audited at all, see "Audit
+  trail" below).
 - `strip_sensitive_fields` drops password/token/card fields outright rather
   than redacting them, for anything that should never leave the
   persistence layer at all.
 - Logs never contain a raw `customer_id` - `app.observability.logging.hash_customer_id`
   one-way-hashes it before it's bound to the structlog context.
+- **A real, live-tested tension**: redacting the customer's message before
+  the LLM ever sees it means the LLM can only propose the literal
+  placeholder (e.g. `<EMAIL_REDACTED>`) as an argument for an external
+  tool whose schema legitimately needs that value (a real API verifying
+  identity by order ID + email, discovered by live-connecting a genuine
+  e-commerce backend and watching it reject the placeholder outright).
+  `app.agents.external_tools._substitute_known_placeholders` resolves
+  this by substituting the real value from this app's own `Customer`
+  record *after* the LLM has proposed the argument, so the LLM itself
+  never sees raw PII (no new exposure to the LLM provider or LangSmith
+  tracing) - only fields this app actually stores are covered (`email`
+  today; `Customer` has no phone/address), so an unrecognized placeholder
+  is left exactly as proposed and fails the same honest way it did
+  before this fix, rather than being guessed at.
 
 ## Audit trail (spec §44 rule 15)
 
-- `tool_executions` - every tool call, with redacted arguments/results,
-  duration, and success/failure.
+- `tool_executions` - every tool call, internal or external, with
+  redacted arguments/results, duration, and success/failure. External
+  (MCP/OpenAPI) calls were not recorded here at all until Phase 11 - a
+  real gap, not a design choice: they never went through `run_tool`,
+  the only place this table was written to.
+- `workflow_events` / `workflow_runs` - a per-node execution trail per
+  message, correlated by `workflow_run_id`. `WorkflowEvent.data` (a
+  curated, decision-relevant subset of each node's output - intent,
+  priority, tool calls, escalation reason, etc., never full response
+  text) was defined from the start but never actually populated until
+  Phase 11 (`app.workflow.graph._traced`/`_event_data`) - this table
+  previously recorded only timing and success/failure, not *what* each
+  node decided.
 - `audit_logs` - a general-purpose append-only log (`app.repositories.audit.AuditRepository`)
   for sensitive operations beyond tool calls.
-- `workflow_events` / `workflow_runs` - a per-node execution trail per
-  message, correlated by `workflow_run_id`.
+- **`GET /api/v1/support/tickets/{id}/trace`** (staff-only, spec: Phase
+  11) - surfaces both tables above for the run that produced a given
+  ticket. Both existed for this exact purpose from early in this
+  project's history but were never actually exposed anywhere until this
+  route + the frontend's "Agent activity trace" panel shipped.
 
 ## External integrations (JIRA / WooCommerce / email / custom APIs / MCP servers / OpenAPI APIs)
 

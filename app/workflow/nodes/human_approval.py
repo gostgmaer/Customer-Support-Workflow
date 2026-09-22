@@ -26,6 +26,7 @@ approval - never speculatively.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from jsonschema import ValidationError as JsonSchemaValidationError
@@ -41,6 +42,7 @@ from app.integrations.stripe import StripeClient
 from app.observability.logging import get_logger
 from app.repositories.integrations import IntegrationRepository
 from app.repositories.orders import PaymentRepository, RefundRepository
+from app.tools.base import record_external_tool_execution
 from app.workflow.deps import get_deps
 from app.workflow.state import SupportState
 
@@ -258,9 +260,21 @@ async def _execute_approved_external_call(
             }
         pending_mcp = {**pending_mcp, "arguments": merged_arguments}
 
+    start = time.perf_counter()
     try:
         result = await _call_external_tool(integration, pending_mcp)
     except IntegrationError as exc:
+        await record_external_tool_execution(
+            deps.session,
+            tenant_id=state["tenant_id"],
+            workflow_run_id=state.get("workflow_run_id", ""),
+            customer_id=state["customer_id"],
+            tool_name=f"{source}:{pending_mcp['tool_name']}",
+            arguments=pending_mcp["arguments"],
+            result={"error": str(exc)},
+            success=False,
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
         logger.warning(
             "external_tool_approved_call_failed",
             integration_id=integration.id,
@@ -282,7 +296,27 @@ async def _execute_approved_external_call(
             "execution_result": {"error": str(exc)},
         }
 
+    duration_ms = (time.perf_counter() - start) * 1000
+    await record_external_tool_execution(
+        deps.session,
+        tenant_id=state["tenant_id"],
+        workflow_run_id=state.get("workflow_run_id", ""),
+        customer_id=state["customer_id"],
+        tool_name=f"{source}:{pending_mcp['tool_name']}",
+        arguments=pending_mcp["arguments"],
+        result=result,
+        success=True,
+        duration_ms=duration_ms,
+    )
     result_text = _result_text(source, result)
+    logger.info(
+        "external_tool_approved_call_succeeded",
+        integration_id=integration.id,
+        integration_name=pending_mcp["integration_name"],
+        source=source,
+        tool=pending_mcp["tool_name"],
+        duration_ms=round(duration_ms, 1),
+    )
     facts.append(f"Called '{pending_mcp['tool_name']}' via {pending_mcp['integration_name']}: {result_text}")
     return {
         "resolution_facts": facts,

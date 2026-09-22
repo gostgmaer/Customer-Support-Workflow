@@ -83,3 +83,17 @@ class WorkflowRepository(TenantScopedRepository):
         self.session.add(execution)
         await self.session.flush()
         return execution
+
+    async def get_events(self, run_id: str) -> list[WorkflowEvent]:
+        stmt = self._scope(
+            select(WorkflowEvent).where(WorkflowEvent.workflow_run_id == run_id), WorkflowEvent
+        ).order_by(WorkflowEvent.created_at.asc())
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_tool_executions(self, run_id: str) -> list[ToolExecution]:
+        stmt = self._scope(
+            select(ToolExecution).where(ToolExecution.workflow_run_id == run_id), ToolExecution
+        ).order_by(ToolExecution.created_at.asc())
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

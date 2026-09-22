@@ -1,5 +1,5 @@
 import { apiFetch } from "@/lib/api/client";
-import type { SupportTicket, WooCommerceOrderSummary } from "@/types/api";
+import type { SupportTicket, TicketTrace, WooCommerceOrderSummary } from "@/types/api";
 
 export function listTickets(params: { status?: string; limit?: number; offset?: number } = {}) {
   return apiFetch<SupportTicket[]>("/api/v1/support/tickets", { query: params });
@@ -7,6 +7,10 @@ export function listTickets(params: { status?: string; limit?: number; offset?: 
 
 export function getTicket(ticketId: string) {
   return apiFetch<SupportTicket>(`/api/v1/support/tickets/${ticketId}`);
+}
+
+export function getTicketTrace(ticketId: string) {
+  return apiFetch<TicketTrace>(`/api/v1/support/tickets/${ticketId}/trace`);
 }
 
 export function approveTicket(

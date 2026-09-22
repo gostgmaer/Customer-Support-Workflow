@@ -212,9 +212,25 @@ curl -X PUT localhost:8000/api/v1/admin/settings/llm_budget_usd_per_run \
 ```
 GET  /api/v1/support/tickets?status=open&limit=50&offset=0   -> [TicketResponse, ...]
 GET  /api/v1/support/tickets/{id}
+GET  /api/v1/support/tickets/{id}/trace   -> TicketTraceResponse   (spec: Phase 11)
 POST /api/v1/support/tickets/{id}/approve   body: {"workflow_run_id": "...", "arguments": {...}?}
 POST /api/v1/support/tickets/{id}/reject    body: {"workflow_run_id": "...", "reason": "..."}
 ```
+
+**`GET .../trace`** - "what did the agent actually do" for the run that
+produced this ticket: `{"workflow_run_id", "events": [...], "tool_executions":
+[...]}`. `events` is every node the workflow graph passed through, in
+order, with its status, duration, and a curated subset of what it
+decided (intent, priority, escalation reason, tool calls proposed, etc. -
+never full response text). `tool_executions` is every real tool call
+made, internal or external (MCP/OpenAPI), with PII-redacted arguments
+and results. Returns `{"workflow_run_id": "", "events": [], "tool_executions": []}`
+for a ticket with no `workflow_run_id` at all (e.g. one filed by an
+inbound webhook, spec: Phase 8.4). Both underlying tables existed for
+this exact purpose from early in this project's history but were never
+populated (`workflow_events.data`) or written to for external tool calls
+(`tool_executions`) until this phase - see `docs/SECURITY.md`'s "Audit
+trail" section.
 
 **`TicketResponse.pending_call`** (spec: Phase 8.2) - `{"integration_name",
 "tool_name", "arguments"}` for an external-tool-call ticket (an MCP or

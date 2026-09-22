@@ -218,6 +218,57 @@ async def test_scenario_ticket_decision_pushes_a_live_nudge_to_the_open_conversa
 
 
 @pytest.mark.asyncio
+async def test_scenario_ticket_trace_records_every_node_and_the_refund_tool_call(
+    client, auth_token, seeded_customer, staff_token
+):
+    """`GET /tickets/{id}/trace` (spec: 'log what the agent actually does')
+    must surface a real, non-empty record of both what the workflow graph
+    did node-by-node (WorkflowEvent.data - previously defined, never
+    populated) and the real internal tool call the refund resolver made
+    (ToolExecution - previously written only via app.tools.base.run_tool,
+    now also for external tool calls, but this scenario exercises the
+    plain internal-tool path since it needs no new integration setup)."""
+    conversation_id = f"conv_{uuid.uuid4().hex[:8]}"
+
+    first = await _post_message(
+        client, auth_token, conversation_id, "The product arrived damaged. I want my money back."
+    )
+    second = await _post_message(client, auth_token, conversation_id, "Yes, please confirm the refund.")
+    assert second["status"] == "awaiting_approval"
+
+    approve_resp = await client.post(
+        f"/api/v1/support/tickets/{second['ticket_id']}/approve",
+        json={"workflow_run_id": second["workflow_run_id"]},
+        headers=_headers(staff_token),
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+
+    trace_resp = await client.get(
+        f"/api/v1/support/tickets/{second['ticket_id']}/trace", headers=_headers(staff_token)
+    )
+    assert trace_resp.status_code == 200, trace_resp.text
+    trace = trace_resp.json()
+
+    assert trace["workflow_run_id"] == second["workflow_run_id"]
+    node_names = {event["node_name"] for event in trace["events"]}
+    # Every node the second (confirm) turn's run passed through before
+    # pausing for approval - proves this is a real per-node trace, not a
+    # single summary row.
+    assert {"classify_intent", "resolve_issue", "human_approval_gate"} <= node_names
+    resolve_issue_event = next(e for e in trace["events"] if e["node_name"] == "resolve_issue")
+    assert resolve_issue_event["data"]["awaiting_approval"] is True
+    assert resolve_issue_event["duration_ms"] is not None
+
+    tool_names = {execution["tool_name"] for execution in trace["tool_executions"]}
+    assert "create_refund_request" in tool_names
+    refund_execution = next(
+        e for e in trace["tool_executions"] if e["tool_name"] == "create_refund_request"
+    )
+    assert refund_execution["success"] is True
+    assert first["conversation_id"] == conversation_id  # sanity: same conversation throughout
+
+
+@pytest.mark.asyncio
 async def test_short_confirmation_reply_carries_over_pending_intent(client, auth_token, seeded_customer):
     """A bare 'yes' shares no keywords with the original request, so the
     classifier alone would misroute it as UNKNOWN - previous_intent

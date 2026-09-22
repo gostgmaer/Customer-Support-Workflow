@@ -17,6 +17,7 @@ after being created, regardless of confirmation - see app.workflow.nodes.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,7 +39,7 @@ from app.tools import orders as order_tools
 from app.tools import payments as payment_tools
 from app.tools import refunds as refund_tools
 from app.tools import subscriptions as subscription_tools
-from app.tools.base import ToolContext
+from app.tools.base import ToolContext, record_external_tool_execution
 
 logger = get_logger(__name__)
 
@@ -593,9 +594,21 @@ async def resolve_via_storefront(
         # Explicit per-integration opt-in only, and only for a read
         # operation - see app.agents.external_tools's module docstring
         # for why this is the one case that skips the approval ticket.
+        start = time.perf_counter()
         try:
             result = await execute_proposal(storefront, proposal)
         except IntegrationError as exc:
+            await record_external_tool_execution(
+                ctx.session,
+                tenant_id=ctx.tenant_id,
+                workflow_run_id=ctx.workflow_run_id,
+                customer_id=ctx.requesting_customer_id,
+                tool_name=f"{proposal.source}:{proposal.tool_name}",
+                arguments=proposal.arguments,
+                result={"error": str(exc)},
+                success=False,
+                duration_ms=(time.perf_counter() - start) * 1000,
+            )
             logger.warning(
                 "storefront_auto_execute_failed",
                 integration_id=storefront.id,
@@ -604,7 +617,26 @@ async def resolve_via_storefront(
             )
             outcome.escalation_reason = f"Storefront lookup failed: {exc}"
             return outcome
+        duration_ms = (time.perf_counter() - start) * 1000
+        await record_external_tool_execution(
+            ctx.session,
+            tenant_id=ctx.tenant_id,
+            workflow_run_id=ctx.workflow_run_id,
+            customer_id=ctx.requesting_customer_id,
+            tool_name=f"{proposal.source}:{proposal.tool_name}",
+            arguments=proposal.arguments,
+            result=result,
+            success=True,
+            duration_ms=duration_ms,
+        )
         result_text = str(result.get("text") or result.get("result") or "completed with no output")
+        logger.info(
+            "storefront_auto_execute_succeeded",
+            integration_id=storefront.id,
+            integration_name=proposal.integration_name,
+            tool=proposal.tool_name,
+            duration_ms=round(duration_ms, 1),
+        )
         outcome.tool_calls.append(
             {"tool": f"{proposal.source}:{proposal.tool_name}", "args": proposal.arguments}
         )

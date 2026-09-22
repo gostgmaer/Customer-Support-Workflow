@@ -537,13 +537,21 @@ source sequentially:
    only picks from what's actually connected (rule 17: prefer
    deterministic logic over autonomous LLM decisions - the resolver map
    above it is never overridden, only extended when it has nothing).
-4. The chosen arguments are validated against that entry's real JSON
-   Schema (`jsonschema.validate` - for OpenAPI, this schema was built by
-   `openapi_client.parse_operations` resolving the spec's path/query/
-   header parameters and its request body's `$ref`s into one flat object
-   schema) before anything is proposed - a plausible-looking but
-   schema-invalid call is treated the same as "no suitable tool", not
-   silently coerced.
+4. Before validation, `_substitute_known_placeholders` (spec: Phase 11,
+   a real live-testing finding) resolves any redaction placeholder the
+   LLM proposed (e.g. `<EMAIL_REDACTED>` - the customer's message was
+   already PII-redacted before this LLM call ever saw it, see
+   `docs/SECURITY.md`'s PII handling section) into the real value from
+   this app's own `Customer` record. Only fields this app actually
+   stores are covered (`email` today); anything else is left as the LLM
+   proposed it.
+5. The chosen (and now placeholder-substituted) arguments are validated
+   against that entry's real JSON Schema (`jsonschema.validate` - for
+   OpenAPI, this schema was built by `openapi_client.parse_operations`
+   resolving the spec's path/query/header parameters and its request
+   body's `$ref`s into one flat object schema) before anything is
+   proposed - a plausible-looking but schema-invalid call is treated the
+   same as "no suitable tool", not silently coerced.
 
 A valid proposal does **not** call anything. It sets
 `awaiting_approval=True` and `SupportState.pending_mcp_call` (field name

@@ -34,6 +34,7 @@ regardless of the flag.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -50,11 +51,76 @@ from app.integrations.openapi_client import call_operation as openapi_call_opera
 from app.integrations.openapi_client import list_operations as openapi_list_operations
 from app.llm.base import LLMProvider
 from app.observability.logging import get_logger
+from app.repositories.customers import CustomerRepository
 from app.repositories.integrations import IntegrationRepository
 from app.security.prompt_security import build_prompt_messages
 from app.tools.base import ToolContext
 
 logger = get_logger(__name__)
+
+# Redaction-placeholder -> Customer attribute this app can safely
+# substitute back in (spec: Phase 11 live-testing finding - an external
+# tool's schema can legitimately need PII as an argument, e.g. "verify by
+# order ID + email", but app.workflow.nodes.resolve_issue redacts the
+# customer's message before any LLM ever sees it - see app.security.pii.
+# The LLM correctly proposes whichever placeholder it was shown; this
+# substitutes the REAL value from this app's own customer record
+# afterward, so the LLM itself never sees raw PII (no new exposure to the
+# LLM provider or LangSmith tracing). Only covers fields this app
+# actually stores (just `email` today - Customer has no phone/address) -
+# anything else the LLM proposes a placeholder for is left as-is and
+# fails validation/execution the same way it did before this fix, rather
+# than guessing at a value this app has no record of.
+#
+# The LLM does not always echo the placeholder back verbatim - live
+# scenario testing (a customer message containing two emails, one a
+# self-correction) caught it collapsing "<EMAIL_REDACTED>" down to a bare
+# "REDACTED", dropping both the angle brackets and the type prefix. The
+# regex below accepts any of "<EMAIL_REDACTED>", "EMAIL_REDACTED", or a
+# bare "REDACTED"; when the type prefix itself is missing, the argument's
+# own key name (e.g. "email") is the fallback signal for which field to
+# substitute - still a fixed, known vocabulary, never a fuzzy guess.
+_REDACTED_VALUE_RE = re.compile(r"^<?\s*(?:([A-Za-z]+)_)?REDACTED\s*>?$", re.IGNORECASE)
+
+_REDACTION_TYPE_TO_CUSTOMER_FIELD: dict[str, str] = {
+    "EMAIL": "email",
+}
+_ARGUMENT_KEY_TO_CUSTOMER_FIELD: dict[str, str] = {
+    "email": "email",
+}
+
+
+def _customer_field_for_placeholder(key: str, value: str) -> str | None:
+    match = _REDACTED_VALUE_RE.match(value.strip())
+    if not match:
+        return None
+    redaction_type = match.group(1)
+    if redaction_type:
+        return _REDACTION_TYPE_TO_CUSTOMER_FIELD.get(redaction_type.upper())
+    return _ARGUMENT_KEY_TO_CUSTOMER_FIELD.get(key.lower())
+
+
+async def _substitute_known_placeholders(ctx: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
+    candidates = {
+        key: _customer_field_for_placeholder(key, value)
+        for key, value in arguments.items()
+        if isinstance(value, str)
+    }
+    if not any(candidates.values()):
+        return arguments  # fast path - nothing to substitute, no DB round-trip needed
+
+    customer = await CustomerRepository(ctx.session, ctx.tenant_id).get(ctx.requesting_customer_id)
+    if customer is None:
+        return arguments
+
+    substituted = dict(arguments)
+    for key, field in candidates.items():
+        if field is None:
+            continue
+        real_value = getattr(customer, field, None)
+        if real_value:
+            substituted[key] = real_value
+    return substituted
 
 _SELECTION_RULES = (
     "You may propose calling AT MOST ONE of the following externally connected "
@@ -248,8 +314,9 @@ async def propose_external_tool_call(
         return None
 
     entry = catalog[selection.tool_index]
+    arguments = await _substitute_known_placeholders(ctx, selection.arguments)
     try:
-        jsonschema_validate(instance=selection.arguments, schema=entry.input_schema)
+        jsonschema_validate(instance=arguments, schema=entry.input_schema)
     except JsonSchemaValidationError as exc:
         logger.warning(
             "external_tool_argument_validation_failed",
@@ -265,7 +332,7 @@ async def propose_external_tool_call(
         integration_name=entry.integration_name,
         source=entry.source,
         tool_name=entry.name,
-        arguments=selection.arguments,
+        arguments=arguments,
         method=entry.method,
         path=entry.path,
         param_locations=entry.param_locations,

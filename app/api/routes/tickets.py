@@ -3,7 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas.ticket import ApproveTicketRequest, RejectTicketRequest, TicketResponse
+from app.api.schemas.ticket import (
+    ApproveTicketRequest,
+    RejectTicketRequest,
+    TicketResponse,
+    TicketTraceResponse,
+)
 from app.config.policies import roles_allowed_to_approve, ticket_queue_filter_for_role
 from app.db.base import new_uuid
 from app.db.session import get_db
@@ -11,7 +16,7 @@ from app.domain.exceptions import AuthorizationError, ValidationError
 from app.domain.models import SupportTicket
 from app.integrations.hooks import create_jira_issue_for_ticket, notify_ticket_decision
 from app.repositories.audit import AuditRepository
-from app.repositories.tickets import TicketRepository
+from app.repositories.tickets import TicketRepository, WorkflowRepository
 from app.security.auth import STAFF_ROLES, require_staff_role
 from app.workflow.runner import resume_workflow
 
@@ -62,6 +67,39 @@ async def get_ticket(
         raise ValidationError(f"Ticket {ticket_id} not found")
     _require_role_for_ticket(ticket, role)
     return ticket
+
+
+@router.get("/{ticket_id}/trace", response_model=TicketTraceResponse)
+async def get_ticket_trace(
+    ticket_id: str,
+    session: AsyncSession = Depends(get_db),
+    staff: tuple[str, str, str] = RequireAnyStaff,
+) -> dict:
+    """Full step-by-step record of what the agent actually did while
+    producing this ticket: every workflow node's decision-relevant output
+    (`WorkflowEvent.data` - see app.workflow.graph's `_traced`), and every
+    real tool call made, internal or external (`ToolExecution` -
+    app.tools.base.run_tool / record_external_tool_execution), with
+    PII-redacted arguments/results. Both tables already existed for this
+    exact purpose (spec §10/§11/§22/§27) but were never actually surfaced
+    anywhere until now."""
+    _staff_id, role, tenant_id = staff
+    ticket_repo = TicketRepository(session, tenant_id)
+    ticket = await ticket_repo.get(ticket_id)
+    if ticket is None:
+        raise ValidationError(f"Ticket {ticket_id} not found")
+    _require_role_for_ticket(ticket, role)
+    if not ticket.workflow_run_id:
+        return {"workflow_run_id": "", "events": [], "tool_executions": []}
+
+    workflow_repo = WorkflowRepository(session, tenant_id)
+    events = await workflow_repo.get_events(ticket.workflow_run_id)
+    tool_executions = await workflow_repo.get_tool_executions(ticket.workflow_run_id)
+    return {
+        "workflow_run_id": ticket.workflow_run_id,
+        "events": events,
+        "tool_executions": tool_executions,
+    }
 
 
 @router.post("/{ticket_id}/approve", response_model=TicketResponse)
