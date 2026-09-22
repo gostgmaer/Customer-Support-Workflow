@@ -407,6 +407,24 @@ door:
   escalation reason explaining the validation failure, the same anomaly
   path a failed external call already takes, never a silent coercion or
   a bypass of the schema check the original proposal was held to.
+- **A REFUND/RETURNS action is gated by the actual policy text before it
+  is even proposed** (spec: Phase 12) - see `docs/ARCHITECTURE.md`'s "RAG
+  policy-check gate for commerce actions" for the full mechanism.
+  `insufficient_data` (no policy doc, no order status/date available)
+  always proceeds exactly as before this gate existed - it can only make
+  a request stricter via a clear, policy-text-grounded denial, never
+  stricter by blocking on ambiguity. `ORDER_CANCEL` is deliberately
+  excluded - its cancellation rule is already enforced deterministically
+  in code (internal `NON_CANCELLABLE_STATUSES`, or the storefront's own
+  status check on its mutating operation), so an LLM-mediated check on
+  top would add risk (a misreading could contradict the deterministic
+  check) for no safety benefit.
+- **At most one enabled integration may carry `config.role: "storefront"`
+  per tenant** (spec: Phase 12 audit) - previously unenforced, meaning
+  which of two simultaneously-tagged integrations actually handled a
+  commerce request was effectively non-deterministic ("first match wins"
+  with no defined ordering). `POST`/`PUT .../admin/integrations` now
+  rejects a create/update that would leave a second one enabled.
 - **Tenant-scoped, not customer-scoped.** An MCP/OpenAPI integration is
   available to every conversation in the tenant that configured it, the
   same trust level as the staff who connected it - `authorize_tool_call`'s

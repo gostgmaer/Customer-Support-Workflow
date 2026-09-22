@@ -24,12 +24,13 @@ from typing import Any
 
 from app.agents.confirmation import customer_already_confirmed
 from app.agents.external_tools import execute_proposal, propose_external_tool_call
+from app.agents.policy_check import check_commerce_policy
 from app.config.policies import get_tool_policy
 from app.domain.exceptions import IntegrationError, ToolError
 from app.domain.models import Integration
 from app.llm.base import LLMProvider
 from app.observability.logging import get_logger
-from app.rag.retriever import RetrievedDocument
+from app.rag.retriever import RetrievedDocument, Retriever
 from app.repositories.conversations import ConversationRepository
 from app.repositories.integrations import IntegrationRepository
 from app.security.prompt_security import build_prompt_messages
@@ -100,6 +101,17 @@ async def resolve_order_status(ctx: ToolContext, customer_id: str, **_) -> Resol
 async def resolve_order_cancel(
     ctx: ToolContext, customer_id: str, *, confirmed: bool, **_
 ) -> ResolutionOutcome:
+    """spec: Phase 12 audit - deliberately has NO app.agents.policy_check
+    gate, unlike resolve_refund. `NON_CANCELLABLE_STATUSES`
+    (app.tools.orders.cancel_order) already deterministically enforces
+    exactly the rule the real seeded Shipping Policy states ("cancelled
+    free of charge only while status is 'placed'"), on every call, with
+    no possibility of being bypassed - confirmed by reading both before
+    deciding this. Adding an LLM-mediated policy check on top would only
+    add latency/cost/a new failure mode for zero additional safety, and
+    could theoretically even contradict the deterministic check (an LLM
+    misreading policy text). The gate exists only where no deterministic
+    check existed before this phase - see resolve_refund."""
     order, outcome = await _handle_order_lookup(ctx, customer_id)
     if not order:
         return outcome
@@ -140,11 +152,19 @@ def _extract_requested_amount(text: str, order_total: float) -> float | None:
     always passing the full total. Requires an explicit `$`/`dollars`/
     `usd` marker rather than any bare number, to avoid misreading an
     order id or quantity as a dollar amount. Returns None (caller falls
-    back to a full refund) if nothing matches."""
+    back to a full refund) if nothing matches OR the parsed amount is not
+    positive (spec: Phase 12 audit - "$0 refund"/a mis-extracted "$0.99
+    shipping fee" aside is never a meaningful refund amount; treating it
+    as "no amount stated" and falling back to a full refund is more useful
+    than creating a real, pointless $0 RefundRequest for a human to
+    review). The regex itself never captures a leading '-' (`\\d+` has no
+    sign), so a negative amount can never reach here in the first place."""
     match = _PARTIAL_AMOUNT_RE.search(text)
     if not match:
         return None
     parsed = float(match.group(1) or match.group(2))
+    if parsed <= 0:
+        return None
     return min(parsed, order_total)
 
 
@@ -157,11 +177,50 @@ async def resolve_refund(
     message_id: str,
     message: str = "",
     history: list[dict] | None = None,
+    llm: LLMProvider | None = None,
+    retriever: Retriever | None = None,
     **_,
 ) -> ResolutionOutcome:
     order, outcome = await _handle_order_lookup(ctx, customer_id)
     if not order:
         return outcome
+
+    # spec: Phase 12 - REFUND/RETURNS both route here and previously created
+    # the refund request regardless of how long ago the order was delivered
+    # (no code anywhere checked this - confirmed by reading
+    # app.tools.refunds.create_refund_request before adding this gate). Runs
+    # before the confirmation prompt so a clearly-out-of-window request is
+    # declined immediately rather than asking the customer to confirm
+    # something that's about to be refused anyway. `llm`/`retriever` are
+    # optional (defensive default None, never actually None from the only
+    # real call site in gather_resolution_facts) so this degrades to
+    # today's unconditional-refund behavior if either is unavailable,
+    # exactly like a missing policy doc or missing delivery date does
+    # inside check_commerce_policy itself. ORDER_CANCEL deliberately gets
+    # no equivalent gate here - see resolve_order_cancel's docstring for why.
+    if llm is not None and retriever is not None:
+        reference_date: str | None = None
+        try:
+            shipping = await order_tools.get_shipping_status(
+                ctx, order_tools.GetShippingStatusArgs(customer_id=customer_id, order_id=order["order_id"])
+            )
+            reference_date = shipping.estimated_delivery
+        except ToolError:
+            pass
+        policy_result = await check_commerce_policy(
+            retriever,
+            llm,
+            tenant_id=ctx.tenant_id,
+            intent="REFUND",  # RETURNS shares the exact same refund-policy document/query
+            order_status=order["status"],
+            order_reference_date=reference_date,
+        )
+        if policy_result.decision == "deny":
+            outcome.facts.append(
+                f"I'm unable to process this request: {policy_result.reason} "
+                f"(per our {policy_result.policy_title or 'refund policy'})."
+            )
+            return outcome
 
     requested_amount = _extract_requested_amount(message, order["total_amount"])
     if requested_amount is None and history:
@@ -549,8 +608,81 @@ def _extract_order_id_from_arguments(arguments: dict[str, Any]) -> str | None:
     return None
 
 
+_ORDER_STATUS_KEY_HINTS = ("status",)
+_ORDER_DATE_KEY_HINTS = ("delivered", "delivery", "deliveredat", "deliverydate", "shippedat")
+
+
+def _find_first_string_value(obj: Any, key_hints: tuple[str, ...]) -> str | None:
+    """Best-effort recursive scan of an arbitrary nested dict/list (an
+    external storefront's own response shape, never controlled by this
+    app - e.g. the real observed `{"result": {"data": {...}}}` nesting
+    seen live-testing this session) for a string value whose key suggests
+    one of `key_hints`. Mirrors `_extract_order_id_from_arguments`'s own
+    "best-effort only, a miss is silently fine" precedent - used only to
+    feed the policy-check gate below, never anything customer-facing."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, str) and any(hint in key.lower().replace("_", "") for hint in key_hints):
+                return value
+        for value in obj.values():
+            found = _find_first_string_value(value, key_hints)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _find_first_string_value(item, key_hints)
+            if found is not None:
+                return found
+    return None
+
+
+async def _lookup_order_snapshot_via_storefront(
+    ctx: ToolContext, llm: LLMProvider, storefront: Integration, order_id: str
+) -> tuple[str | None, str | None]:
+    """Best-effort, read-only (status, reference_date) lookup used ONLY to
+    feed app.agents.policy_check's eligibility gate for a storefront-routed
+    REFUND/RETURNS request (spec: Phase 12) - never for ORDER_CANCEL (see
+    resolve_order_cancel's docstring). A second, narrower
+    `propose_external_tool_call` call targeting the same storefront - the
+    catalog has no separate "find a read operation for this order"
+    primitive, so this is the same LLM-driven selection mechanism already
+    used for the real proposal, just given a status-lookup-shaped
+    synthetic message. Returns (None, None) on anything short of a clean
+    read (no matching operation found, a mutating one selected instead, or
+    the call fails) - the caller treats that identically to "no data
+    available", never as an error; check_commerce_policy already degrades
+    to insufficient_data for either input being None."""
+    try:
+        proposal = await propose_external_tool_call(
+            ctx,
+            llm,
+            f"What is the current status and delivery date of order {order_id}?",
+            role="storefront",
+        )
+    except Exception:
+        logger.warning("policy_check_order_lookup_proposal_failed", order_id=order_id, exc_info=True)
+        return None, None
+    if proposal is None or proposal.is_mutating:
+        return None, None
+    try:
+        result = await execute_proposal(storefront, proposal)
+    except IntegrationError:
+        return None, None
+    return (
+        _find_first_string_value(result, _ORDER_STATUS_KEY_HINTS),
+        _find_first_string_value(result, _ORDER_DATE_KEY_HINTS),
+    )
+
+
 async def resolve_via_storefront(
-    ctx: ToolContext, llm: LLMProvider, message: str, storefront: Integration, conversation_id: str
+    ctx: ToolContext,
+    llm: LLMProvider,
+    message: str,
+    storefront: Integration,
+    conversation_id: str,
+    *,
+    intent: str = "",
+    retriever: Retriever | None = None,
 ) -> ResolutionOutcome:
     """Routes a commerce-shaped intent to the tenant's connected
     storefront instead of this app's internal orders/payments/
@@ -577,6 +709,40 @@ async def resolve_via_storefront(
     if proposal is None:
         outcome.escalation_reason = "No matching storefront operation found for this request"
         return outcome
+
+    # spec: Phase 12 - a storefront-routed REFUND/RETURNS previously
+    # proposed the mutating call with no policy check at all (confirmed:
+    # the demo storefront's own /orders/{id}/refund only validates
+    # amount <= total, no day-window check exists anywhere for this path
+    # either). ORDER_CANCEL is excluded - the storefront's own status
+    # check on the mutating call already enforces that rule deterministically
+    # (demo_storefront's NON_MUTABLE_STATUSES), matching resolve_order_cancel's
+    # reasoning for the internal path. Order status/date come from a second,
+    # best-effort read lookup - see _lookup_order_snapshot_via_storefront's
+    # docstring for why this app can't just read them off `proposal.arguments`
+    # (a storefront's mutating operations typically take only an order id).
+    if intent in {"REFUND", "RETURNS"} and proposal.is_mutating and retriever is not None:
+        order_id_for_policy = _extract_order_id_from_arguments(proposal.arguments)
+        order_status: str | None = None
+        order_date: str | None = None
+        if order_id_for_policy is not None:
+            order_status, order_date = await _lookup_order_snapshot_via_storefront(
+                ctx, llm, storefront, order_id_for_policy
+            )
+        policy_result = await check_commerce_policy(
+            retriever,
+            llm,
+            tenant_id=ctx.tenant_id,
+            intent=intent,
+            order_status=order_status,
+            order_reference_date=order_date,
+        )
+        if policy_result.decision == "deny":
+            outcome.facts.append(
+                f"I'm unable to proceed with this request: {policy_result.reason} "
+                f"(per our {policy_result.policy_title or 'policy'})."
+            )
+            return outcome
 
     # spec: Phase 8.4 - best-effort correlation for a later inbound
     # webhook (see app.api.routes.webhooks) to find its way back to this
@@ -675,11 +841,14 @@ async def gather_resolution_facts(
     history: list[dict],
     retrieved_documents: list[RetrievedDocument],
     llm: LLMProvider | None = None,
+    retriever: Retriever | None = None,
 ) -> ResolutionOutcome:
     if intent in COMMERCE_INTENTS and llm is not None:
         storefront = await _get_storefront_integration(ctx)
         if storefront is not None:
-            return await resolve_via_storefront(ctx, llm, message, storefront, conversation_id)
+            return await resolve_via_storefront(
+                ctx, llm, message, storefront, conversation_id, intent=intent, retriever=retriever
+            )
 
     confirmed = customer_already_confirmed(history, message)
     resolver = INTENT_RESOLVERS.get(intent)
@@ -692,6 +861,8 @@ async def gather_resolution_facts(
             conversation_id=conversation_id,
             message_id=message_id,
             history=history,
+            llm=llm,
+            retriever=retriever,
         )
     if intent in KNOWLEDGE_INTENTS or intent == "UNKNOWN":
         return await resolve_from_knowledge(retrieved_documents, ctx=ctx, llm=llm, message=message)

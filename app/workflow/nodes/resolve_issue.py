@@ -58,6 +58,7 @@ async def resolve_issue(state: SupportState, config: RunnableConfig) -> dict:
         history=state.get("messages", []),
         retrieved_documents=retrieved_documents,
         llm=llm,
+        retriever=deps.retriever,
     )
 
     response = await draft_response(llm, message=message, facts=outcome.facts)

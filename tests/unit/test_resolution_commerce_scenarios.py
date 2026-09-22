@@ -28,7 +28,14 @@ async def _ctx(db_session, customer_id: str, workflow_run_id: str) -> ToolContex
     )
 
 
-async def _add_order(db_session, customer_id: str, *, status: str, total_amount: float = 100.0) -> str:
+async def _add_order(
+    db_session,
+    customer_id: str,
+    *,
+    status: str,
+    total_amount: float = 100.0,
+    estimated_delivery: datetime | None = None,
+) -> str:
     # seeded_customer's own order is placed "now - 1 day" - placed_at
     # here must sort strictly more recent than that so
     # _handle_order_lookup's "latest order" query picks THIS one up,
@@ -43,6 +50,7 @@ async def _add_order(db_session, customer_id: str, *, status: str, total_amount:
             currency="USD",
             product_name="Test Product",
             placed_at=datetime.now(UTC) + timedelta(hours=1),
+            estimated_delivery=estimated_delivery,
         )
     )
     await db_session.flush()
@@ -51,6 +59,25 @@ async def _add_order(db_session, customer_id: str, *, status: str, total_amount:
 
 
 # --- 8.3a: partial refunds ---
+
+
+async def test_extract_requested_amount_treats_zero_as_no_amount_stated():
+    """spec: Phase 12 audit - a $0 (or mis-extracted trivial) amount must
+    fall back to "no amount stated" (a full refund), not create a real,
+    pointless $0 refund request."""
+    from app.agents.resolution import _extract_requested_amount
+
+    assert _extract_requested_amount("I'd like a $0 refund", 100.0) is None
+
+
+async def test_extract_requested_amount_never_captures_a_negative_sign():
+    """The regex has no '-' in its character class, so "-$50" matches only
+    the digits after the '$' - documenting/locking in that this can never
+    produce a negative amount, rather than assuming it from reading the
+    regex alone."""
+    from app.agents.resolution import _extract_requested_amount
+
+    assert _extract_requested_amount("-$50 refund please", 100.0) == 50.0
 
 
 async def test_resolve_refund_extracts_partial_amount_from_message(
@@ -262,3 +289,122 @@ async def test_resolve_payment_retry_asks_for_confirmation_first(
     outcome = await resolve_payment_retry(ctx, customer_id, confirmed=False)
 
     assert outcome.pending_confirmation is True
+
+
+# --- Phase 12: RAG policy-check gate on resolve_refund ---
+
+
+class _StubEligibilityLLM:
+    def __init__(self, qualifies: str, reason: str = "stub") -> None:
+        self._qualifies = qualifies
+        self._reason = reason
+        self.calls = 0
+
+    async def generate(self, *a, **k):
+        raise NotImplementedError
+
+    async def generate_structured(self, messages, *, schema, max_tokens=1024, usage_callback=None):
+        from app.agents.policy_check import CommerceEligibilityCheck
+
+        assert schema is CommerceEligibilityCheck
+        self.calls += 1
+        return CommerceEligibilityCheck(qualifies=self._qualifies, reason=self._reason)
+
+
+class _StubPolicyRetriever:
+    def __init__(self, doc) -> None:
+        self._doc = doc
+        self.calls = 0
+
+    async def retrieve(self, query, *, tenant_id, top_k=4, **_):
+        self.calls += 1
+        return [self._doc] if self._doc else []
+
+
+def _refund_policy_doc():
+    from app.rag.retriever import RetrievedDocument
+
+    return RetrievedDocument(
+        document_id="doc_1", chunk_id="c1", title="Refund Policy", source="refund_policy.md",
+        category="refunds", text="Full refund within 30 days of delivery.", score=0.9,
+    )
+
+
+async def test_resolve_refund_policy_gate_denies_and_never_creates_a_refund_request(
+    db_session, seeded_customer, seeded_workflow_run
+):
+    """A clear policy denial must stop before create_refund_request is ever
+    called - asserted the same way this project's other approval-gate
+    tests assert "never called before approval" (no RefundRequest row
+    exists afterward), not just by reading the returned facts."""
+    from sqlalchemy import select
+
+    from app.agents.resolution import resolve_refund
+    from app.domain.models import RefundRequest
+
+    customer_id = seeded_customer["customer_id"]
+    order_id = await _add_order(
+        db_session, customer_id, status="delivered",
+        estimated_delivery=datetime.now(UTC) - timedelta(days=90),
+    )
+    ctx = await _ctx(db_session, customer_id, seeded_workflow_run["workflow_run_id"])
+    llm = _StubEligibilityLLM("no", reason="Delivered 90 days ago, past the 30-day refund window")
+    retriever = _StubPolicyRetriever(_refund_policy_doc())
+
+    outcome = await resolve_refund(
+        ctx, customer_id, confirmed=True, conversation_id="conv_1", message_id="m1",
+        message="I'd like a refund please.", history=[], llm=llm, retriever=retriever,
+    )
+
+    assert all(call["tool"] != "create_refund_request" for call in outcome.tool_calls)
+    assert any("30-day" in fact for fact in outcome.facts)
+    assert llm.calls == 1
+    stmt = select(RefundRequest).where(RefundRequest.order_id == order_id)
+    existing = (await db_session.execute(stmt)).all()
+    assert existing == []
+
+
+async def test_resolve_refund_policy_gate_allows_and_proceeds_normally(
+    db_session, seeded_customer, seeded_workflow_run
+):
+    from app.agents.resolution import resolve_refund
+
+    customer_id = seeded_customer["customer_id"]
+    await _add_order(
+        db_session, customer_id, status="delivered",
+        estimated_delivery=datetime.now(UTC) - timedelta(days=3),
+    )
+    ctx = await _ctx(db_session, customer_id, seeded_workflow_run["workflow_run_id"])
+    llm = _StubEligibilityLLM("yes", reason="Within the 30-day window")
+    retriever = _StubPolicyRetriever(_refund_policy_doc())
+
+    outcome = await resolve_refund(
+        ctx, customer_id, confirmed=True, conversation_id="conv_1", message_id="m1",
+        message="I'd like a refund please.", history=[], llm=llm, retriever=retriever,
+    )
+
+    assert any("refund request" in fact.lower() for fact in outcome.facts)
+    assert outcome.awaiting_approval is True
+
+
+async def test_resolve_refund_without_llm_or_retriever_skips_the_gate_entirely(
+    db_session, seeded_customer, seeded_workflow_run
+):
+    """Every pre-existing test in this file calls resolve_refund with no
+    llm/retriever at all - confirms that stays true (today's unconditional
+    behavior, unchanged) rather than silently regressing to always-deny."""
+    from app.agents.resolution import resolve_refund
+
+    customer_id = seeded_customer["customer_id"]
+    await _add_order(
+        db_session, customer_id, status="delivered",
+        estimated_delivery=datetime.now(UTC) - timedelta(days=90),
+    )
+    ctx = await _ctx(db_session, customer_id, seeded_workflow_run["workflow_run_id"])
+
+    outcome = await resolve_refund(
+        ctx, customer_id, confirmed=True, conversation_id="conv_1", message_id="m1",
+        message="I'd like a refund please.", history=[],
+    )
+
+    assert any("refund request" in fact.lower() for fact in outcome.facts)

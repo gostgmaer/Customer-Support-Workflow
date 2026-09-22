@@ -223,6 +223,19 @@ def _build_response_review(text: str) -> dict:
     return {"approved": True, "issues": [], "revised_response": None}
 
 
+def _build_commerce_eligibility(text: str) -> dict:
+    # spec: Phase 12 - like _build_external_tool_selection below, this
+    # judgment (does this specific order comply with this specific policy
+    # text under today's date) needs real reasoning over free text, not
+    # keyword matching against a fixed pattern list. The mock always
+    # defers rather than fabricate a policy verdict; app.agents.policy_check
+    # treats "insufficient_data" as "proceed exactly as before this
+    # feature existed", so every MOCK_LLM=true flow is unaffected. Real
+    # allow/deny behavior needs MOCK_LLM=false or a test-local stub LLM
+    # (see tests/unit/test_policy_check.py).
+    return {"qualifies": "insufficient_data", "reason": "mock provider does not evaluate policy text"}
+
+
 def _build_external_tool_selection(text: str) -> dict:
     # Picking a real tool out of a dynamic, admin-configured catalog needs
     # actual reasoning about the tool's description vs. the customer's
@@ -243,4 +256,5 @@ _STRUCTURED_BUILDERS = {
     "GroundingCheck": _build_grounding_check,
     "ResponseReview": _build_response_review,
     "ExternalToolSelection": _build_external_tool_selection,
+    "CommerceEligibilityCheck": _build_commerce_eligibility,
 }

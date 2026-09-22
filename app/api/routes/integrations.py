@@ -81,6 +81,31 @@ async def list_integrations(
     return [_to_response(i) for i in integrations]
 
 
+async def _ensure_single_storefront(
+    repo: IntegrationRepository, *, config: dict, enabled: bool, exclude_id: str | None = None
+) -> None:
+    """spec: Phase 12 audit - at most one ENABLED integration may carry
+    `config.role == "storefront"` per tenant. Previously unenforced:
+    `app.agents.resolution._get_storefront_integration` does "first match
+    wins" with no defined ordering across integrations, so which one
+    actually handled a commerce request was effectively non-deterministic
+    whenever two carried the role simultaneously - confirmed live in this
+    environment (both a "Demo Storefront" and an "Acme Store" integration
+    carried it at once). Enforced here, not in `CreateIntegrationRequest`'s
+    Pydantic validator, since "is there already another one" needs a real
+    DB query, not just this request's own body."""
+    if config.get("role") != "storefront" or not enabled:
+        return
+    for existing in await repo.list():
+        if existing.id == exclude_id:
+            continue
+        if existing.enabled and existing.config.get("role") == "storefront":
+            raise ValidationError(
+                f"Integration '{existing.name}' is already this tenant's storefront - disable it, "
+                "or unset its config.role, before designating another one."
+            )
+
+
 @admin_router.post("", response_model=IntegrationResponse, status_code=201)
 async def create_integration(
     body: CreateIntegrationRequest,
@@ -91,6 +116,7 @@ async def create_integration(
     repo = IntegrationRepository(session, tenant_id)
     if await repo.get_by_name(body.name) is not None:
         raise ValidationError(f"An integration named '{body.name}' already exists")
+    await _ensure_single_storefront(repo, config=body.config, enabled=body.enabled)
 
     integration = Integration(
         name=body.name,
@@ -119,6 +145,12 @@ async def update_integration(
     integration = await repo.get(integration_id)
     if integration is None:
         raise ValidationError(f"Integration {integration_id} not found")
+
+    effective_config = body.config if body.config is not None else integration.config
+    effective_enabled = body.enabled if body.enabled is not None else integration.enabled
+    await _ensure_single_storefront(
+        repo, config=effective_config, enabled=effective_enabled, exclude_id=integration.id
+    )
 
     if body.name is not None:
         integration.name = body.name

@@ -468,6 +468,12 @@ for that one case and answers immediately. See
 `docs/ARCHITECTURE.md`'s "Storefront-primary commerce routing" and
 `docs/SECURITY.md`'s "External tool calls" for the full behavior.
 
+**At most one enabled integration may carry `config.role: "storefront"`
+per tenant** (spec: Phase 12 audit) - `POST`/`PUT .../integrations`
+rejects a create/update that would leave a second one with `422
+ValidationError` naming the already-designated integration; disable it or
+unset its `config.role` first.
+
 **`type: "docs"`** (spec: Phase 9.3, Google Drive/SharePoint added in
 Phase 10.4) syncs external documents into the knowledge base RAG
 retrieval already searches. Requires `config.provider:

@@ -234,3 +234,51 @@ async def test_call_operation_raises_integration_error_on_non_2xx():
 
     with pytest.raises(IntegrationError):
         await call_operation(integration, op, {"orderId": "order_1001"})
+
+
+@respx.mock
+async def test_call_operation_raises_integration_error_on_timeout():
+    """spec: Phase 12 audit - a transport-level failure (timeout,
+    connection refused) was previously only verified by code inspection
+    of the broad `except Exception` in call_operation, never by a real
+    test - a commerce action proposed against an unreachable/slow
+    storefront must surface as the same IntegrationError a 4xx/5xx
+    response does, not an unhandled exception reaching the workflow."""
+    import httpx
+
+    respx.post("https://shop.example.com/api/orders/order_1001/refund").mock(
+        side_effect=httpx.ConnectTimeout("connection timed out")
+    )
+    integration = _openapi_integration()
+    op = OpenApiOperationSpec(
+        operation_id="refundOrder",
+        method="POST",
+        path="/orders/{orderId}/refund",
+        summary="",
+        input_schema={},
+        param_locations={"orderId": "path"},
+    )
+
+    with pytest.raises(IntegrationError, match="refundOrder"):
+        await call_operation(integration, op, {"orderId": "order_1001"})
+
+
+@respx.mock
+async def test_call_operation_raises_integration_error_on_connection_refused():
+    import httpx
+
+    respx.get("https://shop.example.com/api/orders/order_1001").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    integration = _openapi_integration()
+    op = OpenApiOperationSpec(
+        operation_id="getOrder",
+        method="GET",
+        path="/orders/{orderId}",
+        summary="",
+        input_schema={},
+        param_locations={"orderId": "path"},
+    )
+
+    with pytest.raises(IntegrationError):
+        await call_operation(integration, op, {"orderId": "order_1001"})

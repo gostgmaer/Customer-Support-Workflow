@@ -251,6 +251,163 @@ async def test_gather_resolution_facts_routes_commerce_intent_to_storefront_when
     assert not any(call.get("tool") == "get_order_history" for call in outcome.tool_calls)
 
 
+_REFUND_SPEC = [
+    {
+        "operation_id": "refundOrder",
+        "method": "POST",
+        "path": "/orders/{orderId}/refund",
+        "summary": "Refund an order",
+        "input_schema": {
+            "type": "object",
+            "properties": {"orderId": {"type": "string"}},
+            "required": ["orderId"],
+        },
+        "param_locations": {"orderId": "path"},
+    },
+    {
+        "operation_id": "getOrder",
+        "method": "GET",
+        "path": "/orders/{orderId}",
+        "summary": "Fetch order status",
+        "input_schema": {
+            "type": "object",
+            "properties": {"orderId": {"type": "string"}},
+            "required": ["orderId"],
+        },
+        "param_locations": {"orderId": "path"},
+    },
+]
+
+
+class _SequencedStubLLM:
+    """Returns canned structured responses in the order enqueued, keyed by
+    schema type - needed because resolve_via_storefront's policy-check
+    path (spec: Phase 12) makes up to three distinct generate_structured
+    calls in sequence: the original proposal, a second read-only lookup
+    for order status/date, then the policy eligibility check itself."""
+
+    def __init__(self, responses: dict) -> None:
+        self._responses = {k: list(v) for k, v in responses.items()}
+        self.calls: list = []
+
+    async def generate(self, *a, **k):
+        raise NotImplementedError
+
+    async def generate_structured(self, messages, *, schema, max_tokens=1024, usage_callback=None):
+        self.calls.append(schema)
+        queue = self._responses.get(schema)
+        assert queue, f"no stubbed response left for {schema}"
+        return queue.pop(0)
+
+
+def _refund_policy_doc():
+    from app.rag.retriever import RetrievedDocument
+
+    return RetrievedDocument(
+        document_id="doc_1", chunk_id="c1", title="Refund Policy", source="refund_policy.md",
+        category="refunds", text="Full refund within 30 days of delivery.", score=0.9,
+    )
+
+
+class _StubPolicyRetriever:
+    async def retrieve(self, query, *, tenant_id, top_k=4, **_):
+        return [_refund_policy_doc()]
+
+
+@respx.mock
+async def test_resolve_via_storefront_refund_policy_gate_denies_before_calling_refund(db_session):
+    from app.agents.policy_check import CommerceEligibilityCheck
+
+    await _add_storefront(db_session, spec_cache=_REFUND_SPEC)
+    lookup_route = respx.get("https://storefront.example.com/orders/order_1001").mock(
+        return_value=Response(200, json={"status": "delivered", "deliveredAt": "2020-01-01"})
+    )
+    refund_route = respx.post("https://storefront.example.com/orders/order_1001/refund").mock(
+        return_value=Response(200, json={"status": "refund_issued"})
+    )
+    ctx = await _ctx(db_session)
+    llm = _SequencedStubLLM(
+        {
+            ExternalToolSelection: [
+                ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"}),  # refund proposal
+                ExternalToolSelection(tool_index=1, arguments={"orderId": "order_1001"}),  # status lookup
+            ],
+            CommerceEligibilityCheck: [
+                CommerceEligibilityCheck(qualifies="no", reason="Delivered 2020-01-01, past 30-day window"),
+            ],
+        }
+    )
+
+    outcome = await gather_resolution_facts(
+        ctx,
+        intent="REFUND",
+        customer_id="cust_1",
+        conversation_id="conv_1",
+        message_id="m1",
+        message="I'd like a refund for order 1001",
+        history=[],
+        retrieved_documents=[],
+        llm=llm,
+        retriever=_StubPolicyRetriever(),
+    )
+
+    assert outcome.awaiting_approval is False
+    assert outcome.pending_mcp_call is None
+    assert any("30-day" in fact for fact in outcome.facts)
+    assert lookup_route.called
+    assert not refund_route.called
+
+
+@respx.mock
+async def test_resolve_via_storefront_refund_policy_gate_allows_and_proceeds_to_approval(db_session):
+    from app.agents.policy_check import CommerceEligibilityCheck
+
+    storefront = await _add_storefront(db_session, spec_cache=_REFUND_SPEC)
+    respx.get("https://storefront.example.com/orders/order_1001").mock(
+        return_value=Response(200, json={"status": "delivered", "deliveredAt": "2026-09-20"})
+    )
+    ctx = await _ctx(db_session)
+    llm = _SequencedStubLLM(
+        {
+            ExternalToolSelection: [
+                ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"}),
+                ExternalToolSelection(tool_index=1, arguments={"orderId": "order_1001"}),
+            ],
+            CommerceEligibilityCheck: [
+                CommerceEligibilityCheck(qualifies="yes", reason="Within the 30-day window"),
+            ],
+        }
+    )
+
+    outcome = await resolve_via_storefront(
+        ctx, llm, "I'd like a refund for order 1001", storefront, "conv_1", intent="REFUND",
+        retriever=_StubPolicyRetriever(),
+    )
+
+    assert outcome.awaiting_approval is True
+    assert outcome.pending_mcp_call is not None
+    assert outcome.pending_mcp_call["tool_name"] == "refundOrder"
+
+
+async def test_resolve_via_storefront_order_cancel_skips_the_policy_gate_entirely(db_session):
+    """ORDER_CANCEL deliberately gets no policy-check call at all (the
+    storefront's own mutating operation already enforces its status rule
+    deterministically) - proven by an LLM that would fail the test if
+    asked for a CommerceEligibilityCheck it was never stubbed to answer."""
+    storefront = await _add_storefront(db_session, spec_cache=_CANCEL_SPEC)
+    ctx = await _ctx(db_session)
+    llm = _SequencedStubLLM(
+        {ExternalToolSelection: [ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"})]}
+    )
+
+    outcome = await resolve_via_storefront(
+        ctx, llm, "cancel my order 1001", storefront, "conv_1", intent="ORDER_CANCEL",
+        retriever=_StubPolicyRetriever(),
+    )
+
+    assert outcome.awaiting_approval is True
+
+
 async def test_gather_resolution_facts_falls_back_to_internal_resolver_without_storefront(
     db_session, seeded_customer, seeded_workflow_run
 ):

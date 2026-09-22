@@ -614,6 +614,73 @@ A tenant with no `role: "storefront"` integration is entirely unaffected
 - `gather_resolution_facts` falls through to `INTENT_RESOLVERS` exactly
 as before this phase existed.
 
+**At most one enabled integration may carry `config.role: "storefront"`
+per tenant** (spec: Phase 12 audit). Previously unenforced -
+`_get_storefront_integration` did "first match wins" with no defined
+ordering across integrations, so which one actually handled a commerce
+request was effectively non-deterministic whenever two carried the role
+at once. `app.api.routes.integrations._ensure_single_storefront` now
+rejects (`ValidationError`, 422) a create/update that would leave a
+second enabled `role: "storefront"` integration - staff must disable or
+retag the existing one first.
+
+## RAG policy-check gate for commerce actions (spec: Phase 12)
+
+`RETURNS`/`REFUND`/`ORDER_CANCEL` previously proposed or created their
+action with no reference to the actual policy documents in the knowledge
+base at all - `route_request` sends these intents down the
+`action_required` branch, which never runs `knowledge_search_node`, so
+`retrieved_documents` was always empty for them. A customer well past a
+policy's stated return window got the same treatment as one on day one;
+nothing in `app.tools.refunds.create_refund_request` checked this either.
+`app.agents.policy_check.check_commerce_policy` closes this gap with one
+narrow, bounded structured-output LLM call
+(`CommerceEligibilityCheck: qualifies: yes|no|insufficient_data`) - never
+open-ended reasoning, matching `app.agents.classifier`'s existing
+`generate_structured` pattern:
+
+1. Retrieves the relevant policy document via the tenant-scoped
+   `Retriever` (a fixed query per intent - "refund policy - return window
+   in days from delivery" for REFUND/RETURNS; ORDER_CANCEL is
+   deliberately excluded, see below).
+2. Given the policy text plus whatever order status/reference-date is
+   actually available, the model answers `yes`/`no`/`insufficient_data`.
+   `insufficient_data` (no policy doc found, no order status/date to
+   check against, or the policy text doesn't clearly say either way)
+   always means "proceed exactly as before this feature existed" - this
+   gate can only make a request *stricter* via a clear denial, never
+   stricter by blocking on ambiguity.
+3. On `deny`, the resolver returns immediately with a policy-grounded
+   explanation - the mutating tool call (internal or external) is never
+   proposed or executed.
+
+**Wired into exactly two places, deliberately not a third:**
+- `resolve_refund` (internal-resolver path for REFUND/RETURNS) - order
+  status/estimated-delivery come from the already-fetched order plus one
+  extra `get_shipping_status` call (cheap, already an existing tool).
+  Runs before the confirmation prompt, so a clearly-denied request never
+  even asks the customer to confirm it.
+- `resolve_via_storefront`, for REFUND/RETURNS proposals only - order
+  status/date come from a second, best-effort read-only lookup
+  (`_lookup_order_snapshot_via_storefront`, a second
+  `propose_external_tool_call` call scoped to a status-lookup-shaped
+  synthetic message, executed only if it selects a non-mutating
+  operation) since a storefront's mutating operations typically take
+  only an order id, not status/date fields.
+- **`ORDER_CANCEL` deliberately has no gate at all**, in either path -
+  `app.tools.orders.NON_CANCELLABLE_STATUSES` (internal) and the
+  storefront's own status check on its mutating operation (external)
+  already enforce the exact rule the seeded Shipping Policy states
+  ("cancelled free of charge only while status is 'placed'"),
+  deterministically, on every call, with no possibility of being
+  bypassed. Adding an LLM-mediated check on top would only add
+  latency/cost/a new failure mode for zero additional safety.
+
+`MockLLMProvider` always returns `insufficient_data` for
+`CommerceEligibilityCheck` (mirrors `ExternalToolSelection`'s "mock defers
+real reasoning" precedent) - every `MOCK_LLM=true` flow is unaffected
+unless a test explicitly stubs this schema.
+
 ## Expanded commerce scenarios (spec: Phase 8.3)
 
 Four more commerce intents beyond the original seven, each added to

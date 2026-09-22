@@ -343,12 +343,15 @@ async def propose_external_tool_call(
 
 async def execute_proposal(integration: Integration, proposal: ExternalToolProposal) -> dict[str, Any]:
     """The actual external call - MCP or OpenAPI, dispatched by
-    `proposal.source`. Called from exactly two places: `app.workflow.nodes.human_approval`
+    `proposal.source`. Called from three places: `app.workflow.nodes.human_approval`
     after staff approval (the default, safety-first path for every
-    proposal), and `app.agents.resolution.resolve_via_storefront` for a
+    proposal), `app.agents.resolution.resolve_via_storefront` for a
     read-only OpenAPI proposal when the integration has explicitly opted
-    into `config.auto_execute_reads` (spec: Phase 7 A2) - never anywhere
-    else. Raises `IntegrationError` on failure, same contract as
+    into `config.auto_execute_reads` (spec: Phase 7 A2), and
+    `app.agents.resolution._lookup_order_snapshot_via_storefront` for a
+    read-only order-status lookup that feeds the REFUND/RETURNS policy
+    check (spec: Phase 12) - never for a mutating proposal outside the
+    approval flow. Raises `IntegrationError` on failure, same contract as
     `mcp_client.call_tool`/`openapi_client.call_operation` individually."""
     if proposal.source == "openapi":
         op = OpenApiOperationSpec(
