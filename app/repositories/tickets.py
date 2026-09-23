@@ -44,6 +44,21 @@ class TicketRepository(TenantScopedRepository):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_latest_for_conversation(self, conversation_id: str) -> SupportTicket | None:
+        """spec: Phase 15 - CSAT eligibility check (a customer may only rate
+        a conversation whose most recent ticket has actually reached a
+        terminal state)."""
+        stmt = (
+            self._scope(
+                select(SupportTicket).where(SupportTicket.conversation_id == conversation_id),
+                SupportTicket,
+            )
+            .order_by(SupportTicket.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def set_status(
         self, ticket: SupportTicket, status: str, approved_by: str | None = None
     ) -> SupportTicket:

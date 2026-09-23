@@ -1,7 +1,7 @@
 "use client";
 
 import { MessageSquare, RotateCcw } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiErrorState } from "@/components/ui/ApiErrorState";
 import { Button } from "@/components/ui/Button";
@@ -11,6 +11,7 @@ import { Spinner } from "@/components/ui/Spinner";
 
 import { useConversation, useConversationSocket, useMessages, useSendMessage } from "../hooks";
 import { ConversationStatusBar } from "./ConversationStatusBar";
+import { FeedbackPrompt } from "./FeedbackPrompt";
 import { MessageBubble } from "./MessageBubble";
 import { MessageComposer } from "./MessageComposer";
 
@@ -24,7 +25,17 @@ export function ChatThread({
   const conversation = useConversation(conversationId);
   const messages = useMessages(conversationId);
   const sendMessage = useSendMessage(conversationId);
-  useConversationSocket(conversationId);
+  const [showFeedbackPrompt, setShowFeedbackPrompt] = useState(false);
+  // Reset when the conversation changes - React's documented "adjust state
+  // during render" pattern (not an effect, to avoid a cascading-render
+  // lint error) for "reset UI state when a prop changes".
+  const [promptedForConversation, setPromptedForConversation] = useState(conversationId);
+  if (conversationId !== promptedForConversation) {
+    setPromptedForConversation(conversationId);
+    setShowFeedbackPrompt(false);
+  }
+  const handlePromptCsat = useCallback(() => setShowFeedbackPrompt(true), []);
+  useConversationSocket(conversationId, handlePromptCsat);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -78,6 +89,10 @@ export function ChatThread({
 
         <div ref={bottomRef} />
       </div>
+
+      {showFeedbackPrompt && (
+        <FeedbackPrompt conversationId={conversationId} onDone={() => setShowFeedbackPrompt(false)} />
+      )}
 
       <MessageComposer
         onSend={(message) => sendMessage.mutate(message)}

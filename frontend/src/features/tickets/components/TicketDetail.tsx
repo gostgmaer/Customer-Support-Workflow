@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
-import { PriorityBadge, StatusBadge } from "@/components/ui/Badge";
+import { PriorityBadge, SlaBadge, StatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 
@@ -79,6 +79,7 @@ export function TicketDetail({ ticket }: { ticket: SupportTicket }) {
         <div className="flex shrink-0 gap-2">
           <PriorityBadge priority={ticket.priority} />
           <StatusBadge status={ticket.status} />
+          <SlaBadge resolutionDueAt={ticket.resolution_due_at} resolvedAt={ticket.resolved_at} />
         </div>
       </div>
 

@@ -304,6 +304,55 @@ ticket requires `SECURITY_AGENT` or `ADMIN` - a `SUPPORT_AGENT` or
 including `GET`. Every other ticket intent accepts
 `SUPPORT_AGENT`/`SUPPORT_MANAGER`/`ADMIN`.
 
+**`TicketResponse` SLA fields** (spec: Phase 15) - `first_response_due_at`/
+`resolution_due_at` are computed once at ticket creation from
+`app.config.policies.SLA_FIRST_RESPONSE_MINUTES`/`SLA_RESOLUTION_MINUTES`
+(keyed by `priority`); `first_responded_at` is stamped the first time
+staff approves or rejects the ticket; `resolved_at` is stamped only on a
+genuine terminal state (`resolved`/`rejected`, not the reopen-on-
+execution-failure branch). Breach is **never stored** - no scheduler
+exists anywhere in this codebase (a deliberate, repeated constraint - see
+the RAG doc-sync and webhook-correlation phases) - it's computed on-demand,
+client-side (`SlaBadge`) or via `GET /api/v1/analytics/summary` (below),
+by comparing `resolution_due_at` against now.
+
+## CSAT (customer-facing, `Authorization: Bearer <customer JWT>`)
+
+```
+POST /api/v1/support/conversations/{id}/feedback   body: {"rating": 1-5, "comment": "..."?}
+```
+
+A customer may rate a conversation only once it has actually concluded:
+either its most recent ticket reached a terminal state (`resolved`/
+`rejected`), or - for a conversation that never needed a ticket at all -
+the conversation itself is `resolved`. Rating an open/awaiting_approval/
+escalated conversation returns `400 VALIDATION_ERROR`. A second submission
+for the same conversation also returns `400` (one rating per
+conversation). Backed by `app.domain.models.feedback.Feedback`, which
+existed in the schema since the original migration but had zero
+repository/route/usage anywhere until this phase.
+
+## Analytics (staff-only, `Authorization: Bearer <staff JWT>`)
+
+```
+GET /api/v1/analytics/summary?days=30   -> AnalyticsSummary
+```
+
+Every field is a real aggregation over `support_tickets`/`workflow_runs`/
+`feedback` for the trailing `days` window (default 30, max 365) - nothing
+is estimated or fabricated. Notably: `escalation_rate` is
+`escalated_workflow_runs / total_workflow_runs`, where "escalated" means
+the run has an associated `SupportTicket` at all (a ticket is only ever
+created when a run required escalation) - **not**
+`WorkflowRun.requires_human`, which is a current-state field that
+`app.workflow.nodes.save_outcome` overwrites back to `false` once an
+escalated run's ticket is later approved and completes successfully
+(caught by a failing test during this phase's own implementation, not
+assumed). `median_resolution_minutes` is computed in Python
+(`statistics.median`), not a DB-side percentile expression, since this
+app supports both SQLite and Postgres and there's no portable median
+query across both - proportionate at this app's real small-corpus scale.
+
 ## Knowledge base (staff-only, any role unless noted - `Authorization: Bearer <staff JWT>`)
 
 ```

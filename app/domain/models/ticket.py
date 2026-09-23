@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import JSON, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TenantScopedMixin, TimestampMixin, new_uuid
+from app.db.base import Base, TenantScopedMixin, TimestampMixin, UTCDateTime, new_uuid
 
 
 class SupportTicket(Base, TimestampMixin, TenantScopedMixin):
@@ -41,3 +43,11 @@ class SupportTicket(Base, TimestampMixin, TenantScopedMixin):
     # and app.workflow.runner.resume_workflow. None until execution
     # actually happens (never set for a refund, which has no external call).
     execution_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # spec: Phase 15 - SLA targets computed once at creation (see
+    # app.config.policies.SLA_FIRST_RESPONSE_MINUTES/SLA_RESOLUTION_MINUTES)
+    # and the two real staff-action timestamps that satisfy them. Breach is
+    # never stored - always computed on-demand from these vs. now().
+    first_response_due_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    resolution_due_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    first_responded_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

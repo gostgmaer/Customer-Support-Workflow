@@ -31,7 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.config.dynamic_settings import EffectiveSettings, get_effective_settings
-from app.db.base import new_uuid
+from app.config.policies import compute_sla_due_at
+from app.db.base import new_uuid, utcnow
 from app.domain.enums.priority import PRIORITY_ORDER, Priority
 from app.domain.exceptions import AuthorizationError
 from app.domain.models import SupportTicket, WorkflowRun
@@ -197,13 +198,16 @@ async def run_workflow(
                 "tool_name": interrupt_payload.get("tool_name"),
                 "arguments": interrupt_payload.get("arguments"),
             }
+        ticket_priority = result.get("priority", "HIGH")
+        created_at = utcnow()
+        first_response_due_at, resolution_due_at = compute_sla_due_at(ticket_priority, created_at)
         ticket = SupportTicket(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             customer_id=customer_id,
             workflow_run_id=run.id,
             intent=result.get("intent", "REFUND"),
-            priority=result.get("priority", "HIGH"),
+            priority=ticket_priority,
             status="open",
             summary="; ".join(facts) or "Refund pending human approval",
             customer_problem=message,
@@ -212,6 +216,9 @@ async def run_workflow(
             relevant_documents=[],
             reason_for_escalation="High-risk action requires human approval before proceeding",
             pending_call=pending_call,
+            # spec: Phase 15 - SLA targets computed once, here, at creation.
+            first_response_due_at=first_response_due_at,
+            resolution_due_at=resolution_due_at,
         )
         session.add(ticket)
         run.status = "awaiting_approval"
@@ -305,6 +312,14 @@ async def resume_workflow(
         # being folded into resolution_facts/draft_response text. None for
         # a refund resume (human_approval_gate never sets this key for one).
         ticket.execution_result = result.get("execution_result")
+        # spec: Phase 15 - "first response" is defined as the first time a
+        # staff member takes ANY action on this ticket (approve or reject,
+        # including the reopen-on-execution-failure branch below) - this is
+        # the only real staff-action point in the whole ticket lifecycle
+        # (see app.api.routes.tickets, approve/reject are the only status-
+        # mutating routes). Set once, never overwritten by a later action.
+        if ticket.first_responded_at is None:
+            ticket.first_responded_at = utcnow()
         if approved and requires_human_after_resume:
             # The approved action itself failed during execution (e.g. an
             # MCP tool call error after approval, or a disabled/removed
@@ -326,8 +341,10 @@ async def resume_workflow(
                 ticket.priority = Priority.HIGH.value
         else:
             ticket.status = "resolved" if approved else "rejected"
+            ticket.resolved_at = utcnow()
         ticket.approved_by = approver
         await session.flush()
+    reached_terminal_state = ticket is not None and ticket.status in ("resolved", "rejected")
     await session.commit()
 
     # Best-effort live nudge (spec: Phase 10.3's push, extended here) - a
@@ -338,10 +355,18 @@ async def resume_workflow(
     # alongside the new assistant message `send_response` already
     # persisted during the graph's resumed run - never a replacement for
     # it, and a customer not currently connected simply doesn't get the
-    # nudge.
+    # nudge. spec: Phase 15 - `prompt_csat` rides the same broadcast rather
+    # than a second push mechanism; the frontend shows a rating prompt only
+    # when true (never on the reopen-after-execution-failure branch, since
+    # the conversation hasn't actually concluded yet).
     await get_connection_manager().broadcast(
         run.conversation_id,
-        {"event": "ticket_decision", "workflow_run_id": run.id, "approved": approved},
+        {
+            "event": "ticket_decision",
+            "workflow_run_id": run.id,
+            "approved": approved,
+            "prompt_csat": reached_terminal_state,
+        },
     )
 
     return {

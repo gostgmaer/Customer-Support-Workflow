@@ -4,7 +4,7 @@ import { formatDistanceToNow } from "date-fns";
 import { Bug, Inbox } from "lucide-react";
 import Link from "next/link";
 
-import { PriorityBadge, StatusBadge } from "@/components/ui/Badge";
+import { PriorityBadge, SlaBadge, StatusBadge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { cn } from "@/lib/utils/cn";
@@ -57,6 +57,9 @@ export function TicketQueueTable({
                 Status
               </th>
               <th scope="col" className="px-4 py-2.5">
+                SLA
+              </th>
+              <th scope="col" className="px-4 py-2.5">
                 Opened
               </th>
             </tr>
@@ -90,6 +93,12 @@ export function TicketQueueTable({
                 </td>
                 <td className="px-4 py-3">
                   <StatusBadge status={ticket.status} />
+                </td>
+                <td className="px-4 py-3">
+                  <SlaBadge
+                    resolutionDueAt={ticket.resolution_due_at}
+                    resolvedAt={ticket.resolved_at}
+                  />
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">
                   {formatDistanceToNow(new Date(ticket.created_at), { addSuffix: true })}

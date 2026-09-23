@@ -109,6 +109,12 @@ export interface SupportTicket {
   } | null;
   execution_result: Record<string, unknown> | null;
   created_at: string;
+  // Phase 15 - SLA targets/timestamps. Breach is computed client-side from
+  // these vs. now(), never stored - see app.config.policies' SLA constants.
+  first_response_due_at: string | null;
+  resolution_due_at: string | null;
+  first_responded_at: string | null;
+  resolved_at: string | null;
 }
 
 export interface WorkflowEventEntry {
@@ -213,4 +219,39 @@ export interface KnowledgeAskResponse {
   answer: string;
   grounded: boolean;
   sources: KnowledgeAskSource[];
+}
+
+// Phase 15 - CSAT.
+export interface Feedback {
+  id: string;
+  conversation_id: string;
+  rating: number;
+  comment: string;
+  resolved: boolean;
+  created_at: string;
+}
+
+// Phase 15 - Analytics. Every field is a real aggregation - see
+// app.repositories.analytics; a metric this app can't honestly compute
+// simply isn't represented here.
+export interface AnalyticsSummary {
+  period_start: string;
+  period_end: string;
+  total_tickets: number;
+  resolved_tickets: number;
+  rejected_tickets: number;
+  open_tickets: number;
+  avg_resolution_minutes: number | null;
+  median_resolution_minutes: number | null;
+  sla_breached_count: number;
+  sla_breach_rate: number | null;
+  total_workflow_runs: number;
+  escalated_workflow_runs: number;
+  escalation_rate: number | null;
+  csat_average: number | null;
+  csat_count: number;
+  ticket_volume_by_day: { date: string; count: number }[];
+  tickets_by_intent: { intent: string; count: number }[];
+  tickets_by_priority: { priority: string; count: number }[];
+  agent_activity: { staff_id: string; approved_count: number; rejected_count: number }[];
 }

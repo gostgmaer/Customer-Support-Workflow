@@ -52,3 +52,36 @@ const STATUS_VARIANT: Record<string, Variant> = {
 export function StatusBadge({ status }: { status: string }) {
   return <Badge variant={STATUS_VARIANT[status] ?? "default"}>{status.replace(/_/g, " ")}</Badge>;
 }
+
+/**
+ * Phase 15 - SLA breach is never stored server-side (no scheduler exists in
+ * this codebase), so it's computed here, on-demand, from resolution_due_at
+ * vs. now() - mirroring the same on-read philosophy the backend uses.
+ */
+export function SlaBadge({
+  resolutionDueAt,
+  resolvedAt,
+}: {
+  resolutionDueAt: string | null;
+  resolvedAt: string | null;
+}) {
+  if (!resolutionDueAt) return null;
+  const due = new Date(resolutionDueAt);
+  const now = resolvedAt ? new Date(resolvedAt) : new Date();
+  const diffMs = due.getTime() - now.getTime();
+  const breached = diffMs < 0;
+
+  if (resolvedAt) {
+    return breached ? (
+      <Badge variant="danger">SLA breached</Badge>
+    ) : (
+      <Badge variant="success">SLA met</Badge>
+    );
+  }
+  if (breached) {
+    return <Badge variant="danger">SLA overdue</Badge>;
+  }
+  const hoursLeft = Math.round(diffMs / (1000 * 60 * 60));
+  const label = hoursLeft < 1 ? "<1h left" : `${hoursLeft}h left`;
+  return <Badge variant={hoursLeft <= 4 ? "warning" : "default"}>{label}</Badge>;
+}

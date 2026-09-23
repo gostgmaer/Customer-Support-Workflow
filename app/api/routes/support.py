@@ -8,6 +8,7 @@ from app.api.schemas.conversation import (
     CreateConversationRequest,
     MessageResponse,
 )
+from app.api.schemas.feedback import FeedbackResponse, SubmitFeedbackRequest
 from app.api.schemas.support import SupportMessageRequest, SupportMessageResponse
 from app.db.base import new_uuid
 from app.db.session import get_db
@@ -16,6 +17,8 @@ from app.domain.models import Conversation
 from app.observability.metrics import REQUEST_COUNT, WORKFLOW_LATENCY
 from app.realtime.connections import get_connection_manager
 from app.repositories.conversations import ConversationRepository
+from app.repositories.feedback import FeedbackRepository
+from app.repositories.tickets import TicketRepository
 from app.security.auth import decode_access_token, get_current_customer
 from app.security.rate_limit import enforce_rate_limit
 from app.workflow.runner import run_workflow
@@ -90,6 +93,55 @@ async def post_message(
         "response": result.get("response"),
         "requires_human": result["requires_human"],
         "ticket_id": result.get("ticket_id"),
+    }
+
+
+@router.post(
+    "/conversations/{conversation_id}/feedback", response_model=FeedbackResponse, status_code=201
+)
+async def submit_feedback(
+    conversation_id: str,
+    body: SubmitFeedbackRequest,
+    customer: tuple[str, str] = Depends(get_current_customer),
+    session: AsyncSession = Depends(get_db),
+) -> dict:
+    """spec: Phase 15 - CSAT. A customer may rate a conversation only once
+    it has actually concluded: either its most recent ticket reached a
+    terminal state (resolved/rejected - see app.workflow.runner.resume_workflow,
+    the only place a ticket transitions there), or - for a conversation that
+    never needed a ticket at all - the conversation itself is "resolved"
+    (see app.workflow.nodes.save_outcome, the non-escalated path). Rating an
+    open/awaiting_approval/escalated conversation is rejected, not silently
+    accepted, so CSAT data always reflects an actual outcome."""
+    customer_id, tenant_id = customer
+    conversation_repo = ConversationRepository(session, tenant_id)
+    conversation = await conversation_repo.get(conversation_id)
+    if conversation is None or conversation.customer_id != customer_id:
+        raise ValidationError(f"Conversation {conversation_id} not found")
+
+    ticket = await TicketRepository(session, tenant_id).get_latest_for_conversation(conversation_id)
+    eligible = (
+        ticket.status in ("resolved", "rejected") if ticket is not None else conversation.status == "resolved"
+    )
+    if not eligible:
+        raise ValidationError("Feedback can only be submitted for a resolved conversation")
+
+    feedback_repo = FeedbackRepository(session, tenant_id)
+    existing = await feedback_repo.get_for_conversation(conversation_id)
+    if existing is not None:
+        raise ValidationError("Feedback has already been submitted for this conversation")
+
+    feedback = await feedback_repo.create(
+        conversation_id=conversation_id, rating=body.rating, comment=body.comment, resolved=True
+    )
+    await session.commit()
+    return {
+        "id": feedback.id,
+        "conversation_id": feedback.conversation_id,
+        "rating": feedback.rating,
+        "comment": feedback.comment,
+        "resolved": feedback.resolved,
+        "created_at": feedback.created_at,
     }
 
 

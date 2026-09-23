@@ -1,6 +1,16 @@
 "use client";
 
-import { BookOpen, Inbox, LayoutDashboard, LogOut, Plug, Settings, Users, X } from "lucide-react";
+import {
+  BarChart3,
+  BookOpen,
+  Inbox,
+  LayoutDashboard,
+  LogOut,
+  Plug,
+  Settings,
+  Users,
+  X,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
@@ -21,6 +31,7 @@ interface NavItem {
 }
 
 const ADMIN_ITEMS: NavItem[] = [
+  { href: "/admin/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/admin/staff", label: "Staff", icon: Users },
   { href: "/admin/settings", label: "Settings", icon: Settings },
   { href: "/admin/integrations", label: "Integrations", icon: Plug },

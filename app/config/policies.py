@@ -7,6 +7,7 @@ configurable in one place. `app.security.authorization` enforces this.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 
@@ -64,6 +65,40 @@ def get_tool_policy(tool_name: str) -> ToolPolicy:
         return ToolPolicy(False, ApprovalLevel.ALWAYS, ApprovalLevel.ALWAYS)
     return policy
 
+
+# spec: Phase 15 - SLA targets per SupportTicket.priority, in minutes.
+# Computed once into first_response_due_at/resolution_due_at at ticket
+# creation (see app.workflow.runner.run_workflow). No scheduler exists
+# anywhere in this codebase (a deliberate, repeated constraint - see the
+# RAG doc-sync and webhook-correlation phases) - breach is never detected
+# by a background sweep, only computed on-demand at read time by comparing
+# now() against these due-at columns.
+SLA_FIRST_RESPONSE_MINUTES: dict[str, int] = {
+    "CRITICAL": 15,
+    "HIGH": 60,
+    "MEDIUM": 240,
+    "LOW": 480,
+}
+SLA_RESOLUTION_MINUTES: dict[str, int] = {
+    "CRITICAL": 120,
+    "HIGH": 480,
+    "MEDIUM": 1440,
+    "LOW": 2880,
+}
+
+
+def compute_sla_due_at(priority: str, created_at: datetime) -> tuple[datetime, datetime]:
+    """Returns (first_response_due_at, resolution_due_at) for a ticket
+    created at `created_at` with the given priority. An unlisted priority
+    falls back to the widest/LOW target rather than raising - this is a
+    reporting/cosmetic concern, not an authorization decision, so it fails
+    open rather than blocking ticket creation over an SLA lookup miss."""
+    first_response_minutes = SLA_FIRST_RESPONSE_MINUTES.get(priority, SLA_FIRST_RESPONSE_MINUTES["LOW"])
+    resolution_minutes = SLA_RESOLUTION_MINUTES.get(priority, SLA_RESOLUTION_MINUTES["LOW"])
+    return (
+        created_at + timedelta(minutes=first_response_minutes),
+        created_at + timedelta(minutes=resolution_minutes),
+    )
 
 # spec §36 RBAC: security/fraud/legal tickets are a restricted queue -
 # regular support staff cannot approve/reject them, only SECURITY_AGENT or

@@ -1,5 +1,5 @@
 import { apiFetch } from "@/lib/api/client";
-import type { Conversation, Message, SupportMessageResponse } from "@/types/api";
+import type { Conversation, Feedback, Message, SupportMessageResponse } from "@/types/api";
 
 export function createConversation(channel = "web") {
   return apiFetch<Conversation>("/api/v1/support/conversations", {
@@ -14,6 +14,13 @@ export function getConversation(conversationId: string) {
 
 export function listMessages(conversationId: string) {
   return apiFetch<Message[]>(`/api/v1/support/conversations/${conversationId}/messages`);
+}
+
+export function submitFeedback(conversationId: string, rating: number, comment = "") {
+  return apiFetch<Feedback>(`/api/v1/support/conversations/${conversationId}/feedback`, {
+    method: "POST",
+    body: { rating, comment },
+  });
 }
 
 export function postMessage(input: {

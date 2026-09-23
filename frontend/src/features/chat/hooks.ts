@@ -6,7 +6,7 @@ import { useAuthStore } from "@/store/auth-store";
 import { toast } from "@/store/toast-store";
 import type { Message, SupportMessageResponse } from "@/types/api";
 
-import { createConversation, getConversation, listMessages, postMessage } from "./api";
+import { createConversation, getConversation, listMessages, postMessage, submitFeedback } from "./api";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -104,6 +104,16 @@ export function useSendMessage(conversationId: string) {
   });
 }
 
+export function useSubmitFeedback(conversationId: string) {
+  return useMutation({
+    mutationFn: ({ rating, comment }: { rating: number; comment?: string }) =>
+      submitFeedback(conversationId, rating, comment),
+    onError: (error) => {
+      toast.error("Couldn't submit feedback", error instanceof Error ? error.message : undefined);
+    },
+  });
+}
+
 /**
  * Best-effort live push for a storefront webhook event landing on this
  * conversation while the customer is looking at it (spec: Phase 10.3).
@@ -113,7 +123,14 @@ export function useSendMessage(conversationId: string) {
  * WebSocket can't set a custom Authorization header, so the JWT travels
  * as a query param (see app.api.routes.support.conversation_socket).
  */
-export function useConversationSocket(conversationId: string | null) {
+export function useConversationSocket(
+  conversationId: string | null,
+  // Phase 15 - a `ticket_decision` push now carries `prompt_csat: true` when
+  // the ticket reached a genuine terminal state (not the reopen-on-
+  // execution-failure branch) - see app.workflow.runner.resume_workflow.
+  // Optional so every existing caller keeps working unchanged.
+  onPromptCsat?: () => void
+) {
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -125,11 +142,20 @@ export function useConversationSocket(conversationId: string | null) {
     const socket = new WebSocket(
       `${wsBaseUrl}/api/v1/support/ws/conversations/${conversationId}?token=${token}`
     );
-    socket.onmessage = () => {
+    socket.onmessage = (event) => {
       queryClient.invalidateQueries({ queryKey: ["messages", conversationId] });
       queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
+      try {
+        const payload = JSON.parse(event.data as string);
+        if (payload?.prompt_csat === true) {
+          onPromptCsat?.();
+        }
+      } catch {
+        // Not JSON, or shape we don't recognize - the invalidation above
+        // already handled the "something changed, refetch" case.
+      }
     };
 
     return () => socket.close();
-  }, [conversationId, queryClient]);
+  }, [conversationId, queryClient, onPromptCsat]);
 }

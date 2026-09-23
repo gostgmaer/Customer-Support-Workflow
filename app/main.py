@@ -11,6 +11,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.api.routes import (
     admin_settings,
+    analytics,
     customers,
     health,
     integrations,
@@ -111,3 +112,4 @@ app.include_router(integrations.support_router)
 app.include_router(webhooks.router)
 app.include_router(oauth_callback.router)
 app.include_router(knowledge.router)
+app.include_router(analytics.router)

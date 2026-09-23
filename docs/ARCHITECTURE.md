@@ -1188,6 +1188,65 @@ budget, remaining LLM-calling nodes are skipped (returning
 producing a possibly-truncated answer (spec §42: "stop unnecessary calls
 ... or escalate").
 
+## SLA tracking, CSAT, and analytics (spec: Phase 15)
+
+Three previously-missing/non-functional modules, audited and built
+together since analytics depends on the other two's data.
+
+**SLA tracking**: `app.config.policies.compute_sla_due_at(priority,
+created_at)` computes `first_response_due_at`/`resolution_due_at` from
+`SLA_FIRST_RESPONSE_MINUTES`/`SLA_RESOLUTION_MINUTES` (keyed by
+`Priority`), called at both places a `SupportTicket` is ever created
+(`app.workflow.runner.run_workflow`'s interrupt path, and
+`app.workflow.nodes.save_outcome`'s non-interrupted escalation path).
+`first_responded_at`/`resolved_at` are stamped in
+`app.workflow.runner.resume_workflow` at the only two real staff-action
+points (approve/reject). **No scheduler exists anywhere in this
+codebase** (a deliberate, repeated constraint - see the RAG doc-sync and
+webhook-correlation phases) - breach is never detected by a background
+sweep, only computed on-demand: client-side (`SlaBadge`,
+`frontend/src/components/ui/Badge.tsx`) and in the analytics summary's
+`sla_breached_count`/`sla_breach_rate`.
+
+**CSAT**: `app.domain.models.feedback.Feedback` existed in the schema
+since migration 0001 but had zero repository/route/usage anywhere -
+`app.repositories.feedback.FeedbackRepository` and
+`POST /support/conversations/{id}/feedback` (see `docs/API.md`) make it
+a real feature. Triggered via the existing Phase 10.3 websocket push:
+`resume_workflow`'s `ticket_decision` broadcast gained a `prompt_csat`
+field (true only on a genuine terminal resolve/reject, not the
+reopen-on-execution-failure branch); the frontend's
+`useConversationSocket` hook parses it and `FeedbackPrompt.tsx` renders
+a simple 1-5 star + optional comment form - deliberately not a full
+NPS-style survey.
+
+**Analytics**: `GET /api/v1/analytics/summary` (`app.repositories.analytics.AnalyticsRepository`)
+aggregates real data only - ticket volume/intent/priority breakdowns,
+resolution time (mean computed in SQL, **median computed in Python**
+via `statistics.median` since there's no portable median expression
+across this app's two supported DB backends, SQLite and Postgres, and
+this app's real corpus is small enough that fetching the window's
+resolved tickets and computing in Python is proportionate, not a
+shortcut), SLA breach count, CSAT average, and per-agent approve/reject
+counts. **`escalation_rate` deliberately does not use
+`WorkflowRun.requires_human`** - that field is current-state, not
+historical, and `save_outcome` overwrites it back to `false` the moment
+an escalated run's ticket is later approved and completes successfully
+(a real behavior caught by a failing test during this phase's own
+implementation, not assumed in advance). The reliable historical signal
+instead: a `WorkflowRun` with an associated `SupportTicket` at all, since
+a ticket is only ever created when a run required escalation, regardless
+of what happens to it afterward.
+
+**Not done in this pass**: no admin charting library was added - the
+frontend has none today and this app's real data volume doesn't justify
+one; `/admin/analytics` renders dependency-free proportional bar lists
+and stat tiles instead. No SLA breach notifications/alerts (would need
+either a scheduler this app deliberately doesn't have, or the same
+"push on next relevant event" pattern CSAT uses - not built, since there
+is no natural triggering event for a passive breach the way there is for
+a ticket decision).
+
 ## Data model
 
 See `migrations/versions/0001_initial_schema.py` for the full schema
@@ -1196,9 +1255,11 @@ messages, workflow_runs, workflow_events, support_tickets,
 tool_executions, knowledge_documents, knowledge_chunks, feedback,
 audit_logs, idempotency_keys), `0002_vector_embeddings.py` for the
 pgvector-backend storage table, `0003_staff_users.py` for staff accounts,
-`0004_multi_tenancy.py` for the `tenant_id` columns above, and
-`0005_model_requests.py` for cost tracking. `app/domain/models/` holds the
-SQLAlchemy ORM models 1:1 with these tables.
+`0004_multi_tenancy.py` for the `tenant_id` columns above,
+`0005_model_requests.py` for cost tracking, and `0016_ticket_sla_fields.py`
+for the SLA due-at/responded-at/resolved-at columns (Phase 15).
+`app/domain/models/` holds the SQLAlchemy ORM models 1:1 with these
+tables.
 
 ## Reliability
 

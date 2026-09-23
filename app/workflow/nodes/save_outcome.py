@@ -7,6 +7,8 @@ from __future__ import annotations
 from langchain_core.runnables import RunnableConfig
 
 from app.agents.escalation import build_escalation_ticket
+from app.config.policies import compute_sla_due_at
+from app.db.base import utcnow
 from app.domain.models import SupportTicket
 from app.integrations.hooks import notify_ticket_created
 from app.observability.metrics import FIRST_CONTACT_RESOLUTIONS
@@ -70,6 +72,7 @@ async def save_outcome(state: SupportState, config: RunnableConfig) -> dict:
             retrieved_documents=[d["title"] for d in state.get("retrieved_documents", [])],
             escalation_reason=state.get("escalation_reason") or "Escalation criteria met",
         )
+        first_response_due_at, resolution_due_at = compute_sla_due_at(ticket.priority, utcnow())
         created_ticket = await TicketRepository(deps.session, tenant_id).create(
             SupportTicket(
                 conversation_id=ticket.conversation_id,
@@ -84,6 +87,10 @@ async def save_outcome(state: SupportState, config: RunnableConfig) -> dict:
                 relevant_documents=ticket.relevant_documents,
                 reason_for_escalation=ticket.reason_for_escalation,
                 recommended_next_action=ticket.recommended_next_action,
+                # spec: Phase 15 - same SLA computation as the awaiting-approval
+                # ticket path in app.workflow.runner.run_workflow.
+                first_response_due_at=first_response_due_at,
+                resolution_due_at=resolution_due_at,
             )
         )
         await notify_ticket_created(deps.session, tenant_id, created_ticket)

@@ -280,8 +280,16 @@ async def test_scenario_ticket_decision_pushes_a_live_nudge_to_the_open_conversa
     finally:
         manager.unregister(conversation_id, fake_socket)
 
+    # spec: Phase 15 - the broadcast payload gained `prompt_csat` (true here:
+    # this resolve is a genuine terminal state, not the reopen-on-execution-
+    # failure branch) - see app.workflow.runner.resume_workflow.
     assert fake_socket.sent == [
-        {"event": "ticket_decision", "workflow_run_id": second["workflow_run_id"], "approved": True}
+        {
+            "event": "ticket_decision",
+            "workflow_run_id": second["workflow_run_id"],
+            "approved": True,
+            "prompt_csat": True,
+        }
     ]
 
 
@@ -429,3 +437,122 @@ async def test_scenario_refund_approval_issues_a_real_stripe_refund(
         assert refund.status == "approved"
         assert refund.gateway == "stripe"
         assert refund.gateway_reference == "re_scenario_test"
+
+
+@pytest.mark.asyncio
+async def test_scenario_ticket_carries_sla_fields_and_csat_is_only_submittable_after_resolution(
+    client, auth_token, seeded_customer, staff_token, seeded_staff
+):
+    """spec: Phase 15 - SLA due-at fields are set at ticket creation and
+    first_responded_at/resolved_at are stamped at the real staff-action
+    points; CSAT can only be submitted once the conversation has actually
+    concluded, not while a ticket is still open/awaiting approval."""
+    conversation_id = f"conv_{uuid.uuid4().hex[:8]}"
+
+    first = await _post_message(
+        client, auth_token, conversation_id, "The product arrived damaged. I want my money back."
+    )
+    assert first["requires_human"] is False
+
+    second = await _post_message(client, auth_token, conversation_id, "Yes, please confirm the refund.")
+    assert second["status"] == "awaiting_approval"
+    ticket_id = second["ticket_id"]
+
+    open_ticket = (
+        await client.get(f"/api/v1/support/tickets/{ticket_id}", headers=_headers(staff_token))
+    ).json()
+    assert open_ticket["resolution_due_at"] is not None
+    assert open_ticket["first_response_due_at"] is not None
+    assert open_ticket["first_responded_at"] is None
+    assert open_ticket["resolved_at"] is None
+
+    # Feedback rejected while the ticket is still open/awaiting approval.
+    early_feedback = await client.post(
+        f"/api/v1/support/conversations/{conversation_id}/feedback",
+        json={"rating": 5, "comment": "too early"},
+        headers=_headers(auth_token),
+    )
+    assert early_feedback.status_code >= 400
+
+    approve_resp = await client.post(
+        f"/api/v1/support/tickets/{ticket_id}/approve",
+        json={"workflow_run_id": second["workflow_run_id"]},
+        headers=_headers(staff_token),
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+
+    resolved_ticket = (
+        await client.get(f"/api/v1/support/tickets/{ticket_id}", headers=_headers(staff_token))
+    ).json()
+    assert resolved_ticket["status"] == "resolved"
+    assert resolved_ticket["first_responded_at"] is not None
+    assert resolved_ticket["resolved_at"] is not None
+
+    feedback_resp = await client.post(
+        f"/api/v1/support/conversations/{conversation_id}/feedback",
+        json={"rating": 4, "comment": "handled well"},
+        headers=_headers(auth_token),
+    )
+    assert feedback_resp.status_code == 201, feedback_resp.text
+    body = feedback_resp.json()
+    assert body["rating"] == 4
+    assert body["conversation_id"] == conversation_id
+
+    # A second submission for the same conversation is rejected.
+    duplicate = await client.post(
+        f"/api/v1/support/conversations/{conversation_id}/feedback",
+        json={"rating": 1},
+        headers=_headers(auth_token),
+    )
+    assert duplicate.status_code >= 400
+
+
+@pytest.mark.asyncio
+async def test_scenario_feedback_rejected_for_nonexistent_conversation(client, auth_token):
+    resp = await client.post(
+        "/api/v1/support/conversations/conv_does_not_exist/feedback",
+        json={"rating": 3},
+        headers=_headers(auth_token),
+    )
+    assert resp.status_code >= 400
+
+
+@pytest.mark.asyncio
+async def test_scenario_analytics_summary_reflects_a_real_resolved_ticket(
+    client, auth_token, seeded_customer, staff_token, seeded_staff
+):
+    """spec: Phase 15 - the analytics summary aggregates real ticket/
+    workflow_run data, not fabricated numbers - run one real refund
+    end-to-end and confirm the counters actually move."""
+    before = await client.get("/api/v1/analytics/summary", headers=_headers(staff_token))
+    assert before.status_code == 200
+    before_body = before.json()
+
+    conversation_id = f"conv_{uuid.uuid4().hex[:8]}"
+    first = await _post_message(
+        client, auth_token, conversation_id, "The product arrived damaged. I want my money back."
+    )
+    assert first["requires_human"] is False
+    second = await _post_message(client, auth_token, conversation_id, "Yes, please confirm the refund.")
+    approve_resp = await client.post(
+        f"/api/v1/support/tickets/{second['ticket_id']}/approve",
+        json={"workflow_run_id": second["workflow_run_id"]},
+        headers=_headers(staff_token),
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+
+    after = await client.get("/api/v1/analytics/summary", headers=_headers(staff_token))
+    assert after.status_code == 200
+    after_body = after.json()
+
+    assert after_body["total_tickets"] == before_body["total_tickets"] + 1
+    assert after_body["resolved_tickets"] == before_body["resolved_tickets"] + 1
+    assert after_body["total_workflow_runs"] >= before_body["total_workflow_runs"] + 1
+    assert after_body["escalated_workflow_runs"] >= before_body["escalated_workflow_runs"] + 1
+    assert "REFUND" in [row["intent"] for row in after_body["tickets_by_intent"]]
+
+
+@pytest.mark.asyncio
+async def test_scenario_analytics_requires_staff_token(client, auth_token):
+    resp = await client.get("/api/v1/analytics/summary", headers=_headers(auth_token))
+    assert resp.status_code in (401, 403)

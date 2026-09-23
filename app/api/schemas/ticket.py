@@ -29,6 +29,12 @@ class TicketResponse(BaseModel):
     pending_call: dict[str, Any] | None
     execution_result: dict[str, Any] | None
     created_at: datetime
+    # spec: Phase 15 - SLA targets/timestamps. Breach is never stored -
+    # compute it client-side (or in an analytics query) from these vs. now().
+    first_response_due_at: datetime | None
+    resolution_due_at: datetime | None
+    first_responded_at: datetime | None
+    resolved_at: datetime | None
 
 
 class WorkflowEventResponse(BaseModel):
