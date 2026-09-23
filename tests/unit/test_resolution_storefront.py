@@ -568,3 +568,67 @@ async def test_resolve_via_storefront_no_order_argument_records_nothing(db_sessi
 
     conversation = await db_session.get(Conversation, seeded_workflow_run["conversation_id"])
     assert "last_order_id" not in conversation.metadata_json
+
+
+# --- Phase 14: resource-ownership verification wired into the
+# auto-execute-read path (post-hoc, reusing the already-fetched result -
+# see app.agents.external_tools.verify_resource_ownership's docstring for
+# why this doesn't cost a second network call here). ---
+
+
+@respx.mock
+async def test_resolve_via_storefront_auto_execute_withholds_cross_customer_result(
+    db_session, seeded_workflow_run, seeded_customer
+):
+    storefront = await _add_storefront(db_session, spec_cache=_STATUS_SPEC, auto_execute_reads=True)
+    mismatched_owner = {
+        "status": "shipped",
+        "orderId": "order_1001",
+        "customer_email": "someone-else@example.com",
+    }
+    respx.get("https://storefront.example.com/orders/order_1001").mock(
+        return_value=Response(200, json=mismatched_owner)
+    )
+    ctx = ToolContext(
+        session=db_session,
+        requesting_customer_id=seeded_customer["customer_id"],
+        workflow_run_id=seeded_workflow_run["workflow_run_id"],
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    selection = ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"})
+
+    outcome = await resolve_via_storefront(
+        ctx, _StubLLM(selection), "where is my order", storefront, seeded_workflow_run["conversation_id"]
+    )
+
+    assert outcome.awaiting_approval is False
+    assert not any("shipped" in fact for fact in outcome.facts)
+    assert any("couldn't find that" in fact for fact in outcome.facts)
+
+
+@respx.mock
+async def test_resolve_via_storefront_auto_execute_proceeds_when_owner_matches(
+    db_session, seeded_workflow_run, seeded_customer
+):
+    storefront = await _add_storefront(db_session, spec_cache=_STATUS_SPEC, auto_execute_reads=True)
+    matched_owner = {
+        "status": "shipped",
+        "orderId": "order_1001",
+        "customer_email": seeded_customer["email"],
+    }
+    respx.get("https://storefront.example.com/orders/order_1001").mock(
+        return_value=Response(200, json=matched_owner)
+    )
+    ctx = ToolContext(
+        session=db_session,
+        requesting_customer_id=seeded_customer["customer_id"],
+        workflow_run_id=seeded_workflow_run["workflow_run_id"],
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    selection = ExternalToolSelection(tool_index=0, arguments={"orderId": "order_1001"})
+
+    outcome = await resolve_via_storefront(
+        ctx, _StubLLM(selection), "where is my order", storefront, seeded_workflow_run["conversation_id"]
+    )
+
+    assert any("shipped" in fact for fact in outcome.facts)

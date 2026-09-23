@@ -14,10 +14,17 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
+import respx
 import uvicorn
+from httpx import Response
 from mcp.server.mcpserver import MCPServer
 
-from app.agents.external_tools import _describe_arguments, _discover_catalog, propose_external_tool_call
+from app.agents.external_tools import (
+    _describe_arguments,
+    _discover_catalog,
+    propose_external_tool_call,
+    verify_resource_ownership,
+)
 from app.agents.schemas import ExternalToolSelection
 from app.db.base import DEFAULT_TENANT_ID
 from app.domain.models import Integration
@@ -513,3 +520,222 @@ async def test_no_db_lookup_when_no_placeholder_is_present(db_session, mcp_ctx):
 
     assert proposal is not None
     assert proposal.arguments["email"] == "real@example.com"
+
+
+# --- Phase 14: resource-ownership verification ---
+# Confirmed gap: nothing checked that an order/subscription/payment id the
+# LLM extracted from a customer's own chat message actually belonged to
+# the authenticated customer before proposing/auto-executing an external
+# call with it. These tests exercise verify_resource_ownership directly -
+# integration into resolve_via_storefront and human_approval.py's
+# post-approval dispatch is covered in test_resolution_storefront.py /
+# test_human_approval_external.py respectively.
+
+_ORDER_READ_WRITE_SPEC = [
+    {
+        "operation_id": "cancelOrder",
+        "method": "POST",
+        "path": "/orders/{orderId}/cancel",
+        "summary": "Cancel an order",
+        "input_schema": {
+            "type": "object",
+            "properties": {"orderId": {"type": "string"}},
+            "required": ["orderId"],
+        },
+        "param_locations": {"orderId": "path"},
+    },
+    {
+        "operation_id": "getOrder",
+        "method": "GET",
+        "path": "/orders/{orderId}",
+        "summary": "Fetch an order",
+        "input_schema": {
+            "type": "object",
+            "properties": {"orderId": {"type": "string"}},
+            "required": ["orderId"],
+        },
+        "param_locations": {"orderId": "path"},
+    },
+]
+
+
+def _build_openapi_integration(spec_cache: list[dict]) -> Integration:
+    return Integration(
+        id="int_ownership_test",
+        tenant_id=DEFAULT_TENANT_ID,
+        name="Storefront API",
+        type="openapi",
+        base_url="https://storefront.example.com",
+        auth_type="bearer",
+        encrypted_credentials=encode_credentials({"token": "t"}),
+        config={"spec_cache": spec_cache},
+        enabled=True,
+        created_by="staff_1",
+    )
+
+
+@respx.mock
+async def test_verify_resource_ownership_true_when_owner_email_matches(db_session, seeded_customer):
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+    respx.get("https://storefront.example.com/orders/ORD-1").mock(
+        return_value=Response(200, json={"orderId": "ORD-1", "customer_email": seeded_customer["email"]})
+    )
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"orderId": "ORD-1"},
+    )
+
+    assert result is True
+
+
+@respx.mock
+async def test_verify_resource_ownership_false_on_confirmed_mismatch(db_session, seeded_customer):
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+    read_route = respx.get("https://storefront.example.com/orders/ORD-1").mock(
+        return_value=Response(200, json={"orderId": "ORD-1", "customer_email": "someone-else@example.com"})
+    )
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"orderId": "ORD-1"},
+    )
+
+    assert result is False
+    assert read_route.called
+
+
+async def test_verify_resource_ownership_unverifiable_when_no_read_operation_exists(
+    db_session, seeded_customer
+):
+    # spec_cache has only the mutating cancelOrder, no GET sibling - must
+    # fail OPEN (proceed) without attempting any network call at all (no
+    # respx route is registered here, so an attempted call would raise).
+    integration = _build_openapi_integration([_ORDER_READ_WRITE_SPEC[0]])
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"orderId": "ORD-1"},
+    )
+
+    assert result is True
+
+
+@respx.mock
+async def test_verify_resource_ownership_unverifiable_when_response_has_no_owner_field(
+    db_session, seeded_customer
+):
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+    respx.get("https://storefront.example.com/orders/ORD-1").mock(
+        return_value=Response(200, json={"orderId": "ORD-1", "status": "shipped"})
+    )
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"orderId": "ORD-1"},
+    )
+
+    assert result is True
+
+
+async def test_verify_resource_ownership_no_identifier_present_skips_check(db_session, seeded_customer):
+    # No argument names a known resource type - nothing to verify, and no
+    # respx route is mocked, so a stray network call would fail this test.
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"reason": "changed mind"},
+    )
+
+    assert result is True
+
+
+async def test_verify_resource_ownership_mcp_source_is_always_unverifiable(db_session, seeded_customer):
+    # An MCP tool's resource shape is arbitrary per-server - no generic way
+    # to find a sibling read operation or trust a response shape enough to
+    # extract an owner field (named residual risk, see module docstring).
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="mcp",
+        arguments={"orderId": "someone-elses-order"},
+    )
+
+    assert result is True
+
+
+async def test_verify_resource_ownership_prefetched_result_skips_network_call(db_session, seeded_customer):
+    # The auto-execute-read path already has the resource in hand - no
+    # respx route is mocked, so a redundant second call would fail this test.
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"orderId": "ORD-1"},
+        prefetched_result={"orderId": "ORD-1", "customer_email": "someone-else@example.com"},
+    )
+
+    assert result is False
+
+
+async def test_verify_resource_ownership_direct_customer_reference_match(db_session, seeded_customer):
+    # A storefront-opaque customer reference (this project's own demo
+    # storefront's real shape - getSubscription(customer_ref)) is compared
+    # directly against the customer record, with no read lookup needed -
+    # no respx route is mocked here either.
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"customerRef": seeded_customer["customer_id"]},
+    )
+
+    assert result is True
+
+
+async def test_verify_resource_ownership_direct_customer_reference_mismatch(db_session, seeded_customer):
+    integration = _build_openapi_integration(_ORDER_READ_WRITE_SPEC)
+
+    result = await verify_resource_ownership(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        requesting_customer_id=seeded_customer["customer_id"],
+        integration=integration,
+        source="openapi",
+        arguments={"customerRef": "cust_someone_else_entirely"},
+    )
+
+    assert result is False

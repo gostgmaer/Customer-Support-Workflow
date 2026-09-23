@@ -387,3 +387,113 @@ async def test_failed_mcp_call_returns_execution_result_with_error(db_session, m
 
     assert result["requires_human"] is True
     assert "error" in result["execution_result"]
+
+
+# --- Phase 14: resource-ownership verification, right before the one place
+# an approved external call actually dispatches. Runs even after staff
+# approval (defense in depth) - see app.agents.external_tools.verify_resource_ownership. ---
+
+_ORDER_SPEC_WITH_READ_SIBLING = [
+    {
+        "operation_id": "cancelOrder",
+        "method": "POST",
+        "path": "/orders/{orderId}/cancel",
+        "summary": "Cancel an order",
+        "input_schema": {"type": "object", "properties": {"orderId": {"type": "string"}}},
+        "param_locations": {"orderId": "path"},
+    },
+    {
+        "operation_id": "getOrder",
+        "method": "GET",
+        "path": "/orders/{orderId}",
+        "summary": "Fetch an order",
+        "input_schema": {"type": "object", "properties": {"orderId": {"type": "string"}}},
+        "param_locations": {"orderId": "path"},
+    },
+]
+
+
+async def _add_openapi_integration_with_read_sibling(db_session) -> Integration:
+    integration = Integration(
+        id="int_openapi_ownership_1",
+        tenant_id=DEFAULT_TENANT_ID,
+        name="Storefront API",
+        type="openapi",
+        base_url="https://storefront.example.com",
+        auth_type="bearer",
+        encrypted_credentials=encode_credentials({"token": "t"}),
+        config={"spec_cache": _ORDER_SPEC_WITH_READ_SIBLING},
+        enabled=True,
+        created_by="staff_1",
+    )
+    return await IntegrationRepository(db_session, DEFAULT_TENANT_ID).create(integration)
+
+
+@respx.mock
+async def test_execution_blocked_on_confirmed_ownership_mismatch(
+    db_session, seeded_customer, seeded_workflow_run
+):
+    integration = await _add_openapi_integration_with_read_sibling(db_session)
+    get_route = respx.get("https://storefront.example.com/orders/order_1001").mock(
+        return_value=Response(
+            200, json={"orderId": "order_1001", "customer_email": "someone-else@example.com"}
+        )
+    )
+    cancel_route = respx.post("https://storefront.example.com/orders/order_1001/cancel").mock(
+        return_value=Response(200, json={"status": "cancelled"})
+    )
+    state = {
+        "tenant_id": DEFAULT_TENANT_ID,
+        "customer_id": seeded_customer["customer_id"],
+        "workflow_run_id": seeded_workflow_run["workflow_run_id"],
+        "resolution_facts": ["existing fact"],
+    }
+    pending = {
+        "integration_id": integration.id,
+        "integration_name": integration.name,
+        "source": "openapi",
+        "tool_name": "cancelOrder",
+        "arguments": {"orderId": "order_1001"},
+        "method": "POST",
+        "path": "/orders/{orderId}/cancel",
+        "param_locations": {"orderId": "path"},
+    }
+
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
+
+    assert result["requires_human"] is True
+    assert "ownership" in result["escalation_reason"].lower()
+    assert get_route.called
+    assert not cancel_route.called  # the mutating call must never fire on a confirmed mismatch
+
+
+@respx.mock
+async def test_execution_proceeds_when_ownership_verified(db_session, seeded_customer, seeded_workflow_run):
+    integration = await _add_openapi_integration_with_read_sibling(db_session)
+    respx.get("https://storefront.example.com/orders/order_1001").mock(
+        return_value=Response(200, json={"orderId": "order_1001", "customer_email": seeded_customer["email"]})
+    )
+    cancel_route = respx.post("https://storefront.example.com/orders/order_1001/cancel").mock(
+        return_value=Response(200, json={"status": "cancelled"})
+    )
+    state = {
+        "tenant_id": DEFAULT_TENANT_ID,
+        "customer_id": seeded_customer["customer_id"],
+        "workflow_run_id": seeded_workflow_run["workflow_run_id"],
+        "resolution_facts": ["existing fact"],
+    }
+    pending = {
+        "integration_id": integration.id,
+        "integration_name": integration.name,
+        "source": "openapi",
+        "tool_name": "cancelOrder",
+        "arguments": {"orderId": "order_1001"},
+        "method": "POST",
+        "path": "/orders/{orderId}/cancel",
+        "param_locations": {"orderId": "path"},
+    }
+
+    result = await _execute_approved_external_call(state, _fake_config(db_session), pending)
+
+    assert "requires_human" not in result
+    assert cancel_route.called

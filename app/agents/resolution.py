@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.agents.confirmation import customer_already_confirmed
-from app.agents.external_tools import execute_proposal, propose_external_tool_call
+from app.agents.external_tools import execute_proposal, propose_external_tool_call, verify_resource_ownership
 from app.agents.policy_check import check_commerce_policy, check_policy_eligibility
 from app.config.policies import get_tool_policy
 from app.domain.exceptions import IntegrationError, ToolError
@@ -1263,6 +1263,24 @@ async def resolve_via_storefront(
             success=True,
             duration_ms=duration_ms,
         )
+        # spec: Phase 14 - the read already happened (can't be undone), but
+        # this app still refuses to relay a cross-customer result to the
+        # requester. The audit row above intentionally records what really
+        # occurred; only the customer-facing fact is withheld on mismatch.
+        if not await verify_resource_ownership(
+            ctx.session,
+            tenant_id=ctx.tenant_id,
+            requesting_customer_id=ctx.requesting_customer_id,
+            integration=storefront,
+            source=proposal.source,
+            arguments=proposal.arguments,
+            prefetched_result=result,
+        ):
+            outcome.tool_calls.append(
+                {"tool": f"{proposal.source}:{proposal.tool_name}", "args": proposal.arguments}
+            )
+            outcome.facts.append("I couldn't find that on your account.")
+            return outcome
         result_text = str(result.get("text") or result.get("result") or "completed with no output")
         logger.info(
             "storefront_auto_execute_succeeded",

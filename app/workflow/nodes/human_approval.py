@@ -35,6 +35,7 @@ from jsonschema import validate as jsonschema_validate
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
+from app.agents.external_tools import verify_resource_ownership
 from app.domain.exceptions import IntegrationError, ToolError
 from app.integrations.mcp_client import call_tool as mcp_call_tool
 from app.integrations.openapi_client import OpenApiOperationSpec
@@ -341,6 +342,38 @@ async def _execute_approved_external_call(
                 ),
             }
         pending_mcp = {**pending_mcp, "arguments": merged_arguments}
+
+    # spec: Phase 14 - resource-ownership verification, right before the
+    # one place this call actually happens. Runs even for a staff-approved
+    # proposal (defense in depth): a human approving "this looks like a
+    # reasonable action" doesn't necessarily cross-check that the order id
+    # actually belongs to the requesting customer, and a staff-edited
+    # argument override (just above) could itself introduce a mismatch.
+    # See app.agents.external_tools.verify_resource_ownership's own
+    # docstring for what "verified" does and doesn't cover.
+    if not await verify_resource_ownership(
+        deps.session,
+        tenant_id=state["tenant_id"],
+        requesting_customer_id=state["customer_id"],
+        integration=integration,
+        source=source,
+        arguments=pending_mcp["arguments"],
+    ):
+        logger.warning(
+            "external_tool_blocked_ownership_mismatch",
+            integration_id=integration.id,
+            source=source,
+            tool=pending_mcp["tool_name"],
+        )
+        return {
+            "requires_human": True,
+            "escalation_reason": "Resource ownership could not be verified for this request",
+            "resolution_facts": facts,
+            "draft_response": (
+                "I'm sorry, I couldn't find that on your account. A team member will follow up."
+            ),
+            "execution_result": {"error": "ownership_verification_failed"},
+        }
 
     start = time.perf_counter()
     try:

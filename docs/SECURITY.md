@@ -440,20 +440,130 @@ door:
   commerce request was effectively non-deterministic ("first match wins"
   with no defined ordering). `POST`/`PUT .../admin/integrations` now
   rejects a create/update that would leave a second one enabled.
-- **Tenant-scoped, not customer-scoped.** An MCP/OpenAPI integration is
-  available to every conversation in the tenant that configured it, the
-  same trust level as the staff who connected it - `authorize_tool_call`'s
-  ownership/permission-matrix checks (which assume a tool call targets a
-  specific `customer_id`) don't apply the same way here, since neither an
-  MCP tool's nor an OpenAPI operation's arguments are guaranteed to
-  reference a customer at all. This is a deliberate scope decision, not
-  an oversight: don't add an external-tool integration a tenant's staff
-  shouldn't be trusted to configure.
+- **Resource ownership is verified, best-effort, before a proposal
+  targeting a specific order/subscription/payment/invoice/account is
+  approved-for-ticket, auto-executed, or dispatched** (spec: Phase 14) -
+  see "Resource ownership verification" below for the full mechanism.
+  This is genuinely new coverage, not a restatement of the tenant-scoping
+  bullet just below: an LLM proposal's arguments are built from whatever
+  the customer's own chat message says, and prior to this phase nothing
+  checked that an order id (etc.) a customer typed actually belonged to
+  them before proposing or auto-executing an action against it.
+- **Tenant-scoped, not customer-scoped, as configuration.** An MCP/OpenAPI
+  integration is available to every conversation in the tenant that
+  configured it, the same trust level as the staff who connected it -
+  `authorize_tool_call`'s ownership/permission-matrix checks (which
+  assume a tool call targets a specific `customer_id`) don't apply the
+  same way here, since neither an MCP tool's nor an OpenAPI operation's
+  arguments are guaranteed to reference a customer at all. This remains a
+  deliberate scope decision for *which integrations a tenant can reach* -
+  don't add an external-tool integration a tenant's staff shouldn't be
+  trusted to configure. It's a separate concern from the bullet above,
+  which checks *which specific resource within that integration* a given
+  proposal targets, once one is available to check.
 - Auth is header-based only (`api_key`/`bearer`/`none`) - `auth_type:
   "basic"` is rejected at creation for `type: "mcp"`, since the
   Streamable HTTP client has no username/password concept to map it
   onto. `type: "openapi"` accepts `basic` (a plain outbound HTTPS call
   can express it) in addition to the other three.
+
+### Resource ownership verification (spec: Phase 14)
+
+**The confirmed gap this closes**: a customer's chat message drives what
+arguments an LLM proposes for a storefront-routed or MCP/OpenAPI-fallback
+action - e.g. "cancel order ORD-1002" produces `{"order_id": "ORD-1002"}"`.
+Before this phase, nothing checked that `ORD-1002` actually belonged to
+the customer sending that message before the system proposed (or, for a
+read with `auto_execute_reads` on, immediately executed) an action
+against it. A customer referencing another customer's real order id would
+have it handled identically to their own. Internal, DB-backed resolvers
+were separately audited and confirmed NOT to have this gap - they only
+ever act on an order/payment/subscription id looked up from the
+requesting customer's own records (`app.agents.resolution._handle_order_lookup`),
+never one parsed from message text, so `app.tools.orders.cancel_order`
+etc.'s own `order.customer_id != args.customer_id` check was always
+checking a value this app already knew was theirs. This mechanism exists
+for the external-integration path specifically.
+
+**The mechanism** (`app.agents.external_tools.verify_resource_ownership`,
+called from both `app.agents.resolution.resolve_via_storefront`'s
+auto-execute-read branch and `app.workflow.nodes.human_approval._execute_approved_external_call`,
+right before the one place a call actually dispatches - including after
+staff approval, as defense in depth against a human not independently
+cross-checking database ownership, and against a staff-edited argument
+override introducing a mismatch):
+
+1. If a proposal's arguments contain a directly customer-identifying
+   value (e.g. `customer_ref`, `customer_id`, `customer_email` -
+   this project's own demo storefront addresses subscriptions this way),
+   that value is compared straight against the requesting customer's own
+   record - no network call needed.
+2. Otherwise, if an argument names a known resource type (order,
+   subscription, payment, invoice, account - by key substring, e.g.
+   `orderId`/`order_id`), this app checks whether the SAME integration's
+   already-cached OpenAPI spec (`config.spec_cache`) exposes a GET
+   operation for that same resource (a pure, local, no-network check). If
+   one exists, it's called (or, on the auto-execute-read path, the
+   already-fetched result is reused instead of a second call) and the
+   response is scanned for an owner-identifying field (email, customer
+   id/ref/name).
+3. The resolved owner value is compared against the customer's real
+   record - exact match for email (the reliable case, the same source
+   `_substitute_known_placeholders` already trusts for PII substitution);
+   a normalized, best-effort substring match for an opaque reference like
+   `customer_ref` (no universal format for these exists across arbitrary
+   connected storefronts, so this genuinely cannot be made airtight - see
+   the gap noted below).
+
+**Fails open on genuine ambiguity, fails closed only on a confirmed
+mismatch** - a deliberate choice, not an oversight: refusing every action
+on any integration that merely lacks a matching read operation (common -
+many legitimate write operations have no read counterpart) would have
+broken large swaths of already-shipped, live-verified storefront-routing
+functionality for no confirmed problem. Concretely, this app's own
+`demo_storefront` fixture had NO customer-identifying field anywhere
+before this phase gave it one specifically to make the check meaningful -
+before that fix, a strict fail-closed default would have blocked every
+scenario against it. "Genuinely could not check" covers: no resource
+identifier present in the arguments at all, no matching read operation
+cataloged, the read call itself fails, or the read succeeds but its
+response has no recognizable owner field. Each of these is logged
+(`resource_ownership_unverifiable_*`) so the gap is visible in
+observability, not silent. A CONFIRMED mismatch
+(`resource_ownership_mismatch`) always refuses - no ticket is created, no
+auto-execute happens, no post-approval dispatch fires - and the
+customer-facing response is the same generic "I couldn't find that on
+your account" a genuine not-found gets, never revealing that the resource
+exists under someone else's ownership (avoids an IDOR/enumeration
+oracle).
+
+**Named residual risks, not silently glossed over**:
+
+- **MCP sources are always treated as unverifiable.** An MCP tool's
+  resource shape is arbitrary per-server - there's no HTTP-method/REST-path
+  convention to find a "sibling read operation" the way there is for
+  OpenAPI, and no safe way to guess a response shape well enough to trust
+  an extracted "owner" field. Any MCP-routed action with a resource
+  identifier in its arguments is unverified by this mechanism; the
+  existing per-action human-approval gate remains the operative safety
+  boundary there, unchanged.
+- **An opaque customer-reference match (`customer_ref`-shaped) is
+  best-effort/fuzzy**, not exact - normalized and substring-compared
+  against the customer's id/full name, since no connected storefront is
+  guaranteed to use this app's own id format. A sufficiently unusual
+  reference scheme could produce a false negative (blocking a legitimate
+  action) or, in principle, a coincidental false positive; email is the
+  one field this app treats as an exact, reliable match.
+- **A single-operation integration (no read counterpart at all) gets no
+  independent verification from this mechanism.** This environment's real
+  connected storefront (Acme Store) is exactly this case today - its
+  `trackOrder` operation is POST-only with no GET sibling. Its own
+  built-in protection is `_substitute_known_placeholders` always
+  supplying the requesting customer's real, verified email as the
+  `email` argument (never a customer-typed one) - whether Acme's own
+  backend independently validates that the order id and email correspond
+  is outside this app's control or knowledge, and not something this
+  phase can verify.
 
 ### OAuth2 docs connectors (Google Drive / SharePoint, spec: Phase 10.4)
 
