@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 
 from app.llm.base import LLMProvider
 from app.observability.logging import get_logger
-from app.rag.retriever import Retriever
+from app.rag.retriever import RetrievedDocument, Retriever
 from app.security.prompt_security import build_prompt_messages
 
 logger = get_logger(__name__)
@@ -48,11 +48,16 @@ logger = get_logger(__name__)
 # here - REFUND and RETURNS share the same "refunds" category doc (see
 # app.agents.resolution.INTENT_RESOLVERS, both already map to
 # resolve_refund). An intent absent from this map always short-circuits to
-# insufficient_data (proceed as before), not a KeyError.
+# insufficient_data (proceed as before), not a KeyError. EXCHANGE (spec:
+# Phase 13) reuses the return-policy query - there is no dedicated seeded
+# "Exchange Policy" doc, and real e-commerce exchange eligibility windows
+# conventionally mirror return windows; confirmed no better-matching doc
+# exists in this tenant's seeded knowledge base before reusing this query.
 _POLICY_QUERIES: dict[str, str] = {
     "ORDER_CANCEL": "order cancellation policy - which order statuses can be cancelled",
     "REFUND": "refund policy - return window in days from delivery",
     "RETURNS": "return policy - return window in days from delivery",
+    "EXCHANGE": "exchange or return eligibility policy, return window",
 }
 
 
@@ -76,6 +81,75 @@ class PolicyCheckResult:
     policy_title: str | None = None
 
 
+_DECISION_MAP: dict[str, Literal["allow", "deny", "insufficient_data"]] = {
+    "yes": "allow", "no": "deny", "insufficient_data": "insufficient_data",
+}
+
+
+async def _retrieve_policy_doc(
+    retriever: Retriever, *, tenant_id: str, query: str
+) -> RetrievedDocument | None:
+    try:
+        docs = await retriever.retrieve(query, tenant_id=tenant_id, top_k=1)
+    except Exception:
+        logger.warning("policy_check_retrieval_failed", query=query, exc_info=True)
+        return None
+    return docs[0] if docs else None
+
+
+async def check_policy_eligibility(
+    retriever: Retriever,
+    llm: LLMProvider,
+    *,
+    tenant_id: str,
+    query: str,
+    question: str,
+    facts: dict[str, str | None],
+) -> PolicyCheckResult:
+    """spec: Phase 13 - the generic form of this module's original
+    REFUND/RETURNS/ORDER_CANCEL-only gate (check_commerce_policy, now a
+    thin wrapper over this). Any resolver with a real policy document that
+    could plausibly gate or inform its outcome can call this directly -
+    `facts` is an arbitrary label->value dict rendered into the prompt
+    (e.g. {"plan": "Pro Annual", "days since purchase": "5"}), not just
+    the original order_status/order_reference_date pair. Same
+    insufficient_data-on-ambiguity posture as before: this can only ever
+    make an outcome STRICTER via a clear denial, never stricter by
+    blocking on ambiguity - a missing/unclear policy always means
+    "proceed as if this check didn't exist"."""
+    policy_doc = await _retrieve_policy_doc(retriever, tenant_id=tenant_id, query=query)
+    if policy_doc is None:
+        return PolicyCheckResult(decision="insufficient_data")
+    if not any(facts.values()):
+        return PolicyCheckResult(decision="insufficient_data", policy_title=policy_doc.title)
+
+    facts_text = "\n".join(f"{label}: {value or 'unknown'}" for label, value in facts.items())
+    rules = (
+        "You are checking whether the following customer request complies with the company's "
+        "own policy text below. Base your answer only on that text and the facts given - never "
+        "on outside knowledge of typical retail policies.\n\n"
+        f"REQUEST: {question}\n\n"
+        f"POLICY TEXT:\n{policy_doc.text}\n\n"
+        f"FACTS:\n{facts_text}\n"
+        f"TODAY'S DATE: {datetime.now(UTC).date().isoformat()}"
+    )
+    messages = build_prompt_messages(
+        business_policies="", developer_rules=rules, retrieved_knowledge=[], customer_message="",
+    )
+    try:
+        result = await llm.generate_structured(messages, schema=CommerceEligibilityCheck)
+    except Exception:
+        logger.warning("policy_check_llm_failed", query=query, exc_info=True)
+        return PolicyCheckResult(decision="insufficient_data", policy_title=policy_doc.title)
+
+    decision = _DECISION_MAP[result.qualifies]
+    if decision == "deny":
+        logger.info(
+            "policy_check_denied", query=query, policy_title=policy_doc.title, reason=result.reason
+        )
+    return PolicyCheckResult(decision=decision, reason=result.reason, policy_title=policy_doc.title)
+
+
 async def check_commerce_policy(
     retriever: Retriever,
     llm: LLMProvider,
@@ -85,61 +159,34 @@ async def check_commerce_policy(
     order_status: str | None,
     order_reference_date: str | None,
 ) -> PolicyCheckResult:
-    """`order_reference_date` is a best-effort ISO date string for "when did
-    (or will) this order arrive" - the only fact a day-window policy like
-    the refund policy actually needs. Neither this app's internal `Order`
-    model nor the demo storefront fixture track a real delivery timestamp
-    today (confirmed by reading both before writing this) - callers pass
-    `None` when they have nothing better, and this function degrades to
-    insufficient_data rather than guessing, exactly like a missing policy
-    doc does."""
+    """The original REFUND/RETURNS/ORDER_CANCEL/EXCHANGE commerce-action
+    gate (spec: Phase 12, EXCHANGE added Phase 13) - now a thin wrapper
+    over check_policy_eligibility, with its exact original signature/
+    behavior preserved for its existing callers (resolve_refund,
+    resolve_via_storefront). `order_reference_date` is a best-effort ISO
+    date string for "when did (or will) this order arrive" - the only
+    fact a day-window policy like the refund policy actually needs.
+    Neither this app's internal `Order` model nor the demo storefront
+    fixture track a real delivery timestamp today (confirmed by reading
+    both before writing this) - callers pass `None` when they have
+    nothing better, and this degrades to insufficient_data rather than
+    guessing, exactly like a missing policy doc does."""
     query = _POLICY_QUERIES.get(intent)
     if query is None:
         return PolicyCheckResult(decision="insufficient_data")
-
-    try:
-        docs = await retriever.retrieve(query, tenant_id=tenant_id, top_k=1)
-    except Exception:
-        logger.warning("policy_check_retrieval_failed", intent=intent, exc_info=True)
-        return PolicyCheckResult(decision="insufficient_data")
-
-    if not docs:
-        return PolicyCheckResult(decision="insufficient_data")
-
-    policy_doc = docs[0]
     if order_status is None and order_reference_date is None:
-        return PolicyCheckResult(decision="insufficient_data", policy_title=policy_doc.title)
-
-    today = datetime.now(UTC).date().isoformat()
-    rules = (
-        "You are checking whether a customer's commerce request (cancel/return/refund) "
-        "complies with the company's own policy text below. Base your answer only on that "
-        "text and the order facts given - never on outside knowledge of typical retail "
-        "policies.\n\n"
-        f"POLICY TEXT:\n{policy_doc.text}\n\n"
-        f"ORDER STATUS: {order_status or 'unknown'}\n"
-        f"ORDER REFERENCE DATE (delivery date if known, else order placement date): "
-        f"{order_reference_date or 'unknown'}\n"
-        f"TODAY'S DATE: {today}"
-    )
-    messages = build_prompt_messages(
-        business_policies="", developer_rules=rules, retrieved_knowledge=[], customer_message="",
-    )
-    try:
-        result = await llm.generate_structured(messages, schema=CommerceEligibilityCheck)
-    except Exception:
-        logger.warning("policy_check_llm_failed", intent=intent, exc_info=True)
-        return PolicyCheckResult(decision="insufficient_data", policy_title=policy_doc.title)
-
-    _DECISION_MAP: dict[str, Literal["allow", "deny", "insufficient_data"]] = {
-        "yes": "allow", "no": "deny", "insufficient_data": "insufficient_data",
-    }
-    decision = _DECISION_MAP[result.qualifies]
-    if decision == "deny":
-        logger.info(
-            "commerce_policy_check_denied",
-            intent=intent,
-            policy_title=policy_doc.title,
-            reason=result.reason,
+        policy_doc = await _retrieve_policy_doc(retriever, tenant_id=tenant_id, query=query)
+        return PolicyCheckResult(
+            decision="insufficient_data", policy_title=policy_doc.title if policy_doc else None
         )
-    return PolicyCheckResult(decision=decision, reason=result.reason, policy_title=policy_doc.title)
+    return await check_policy_eligibility(
+        retriever,
+        llm,
+        tenant_id=tenant_id,
+        query=query,
+        question=f"Does this order qualify for the customer's requested {intent.lower()}?",
+        facts={
+            "order status": order_status,
+            "order reference date (delivery date if known, else order placement date)": order_reference_date,
+        },
+    )

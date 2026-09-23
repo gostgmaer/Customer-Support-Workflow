@@ -6,7 +6,9 @@ import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
 
 interface PendingCall {
-  integration_name: string;
+  // spec: Phase 13 - null for an internal-action ticket (e.g. a profile
+  // update or account unlock), which has no external integration involved.
+  integration_name: string | null;
   tool_name: string;
   arguments: Record<string, unknown>;
 }
@@ -28,7 +30,16 @@ export function PendingCallPanel({
     <div className="rounded-md border border-border p-4">
       <div className="flex items-center gap-2 text-sm font-medium">
         <Cable className="size-4 text-muted-foreground" aria-hidden="true" />
-        Proposed call to {pendingCall.integration_name}: <code className="text-xs">{pendingCall.tool_name}</code>
+        {pendingCall.integration_name ? (
+          <>
+            Proposed call to {pendingCall.integration_name}:{" "}
+            <code className="text-xs">{pendingCall.tool_name}</code>
+          </>
+        ) : (
+          <>
+            Proposed account action: <code className="text-xs">{pendingCall.tool_name}</code>
+          </>
+        )}
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
         Review the arguments below before approving - edit any field to change what actually runs.

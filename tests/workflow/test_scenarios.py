@@ -130,6 +130,74 @@ async def test_scenario_refund_requires_confirmation_then_human_approval(
 
 
 @pytest.mark.asyncio
+async def test_scenario_account_unlock_requires_confirmation_then_human_approval(
+    client, auth_token, seeded_customer, staff_token, seeded_staff
+):
+    """spec: Phase 13 - a locked account proposes a real unlock_account
+    action, gated by BOTH customer confirmation AND staff approval - and
+    must not actually unlock until approved (identity-modifying,
+    ApprovalLevel.ALWAYS in both directions)."""
+    from sqlalchemy import select
+
+    from app.db.session import get_sessionmaker
+    from app.domain.models import Customer
+
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            select(Customer).where(Customer.id == seeded_customer["customer_id"])
+        )
+        customer = result.scalar_one()
+        customer.is_locked = True
+        await session.commit()
+
+    conversation_id = f"conv_{uuid.uuid4().hex[:8]}"
+    first = await _post_message(
+        client, auth_token, conversation_id,
+        "I'm having an account access problem - it's locked and I can't log in.",
+    )
+    assert first["requires_human"] is False
+    assert first["status"] == "resolved"
+
+    second = await _post_message(
+        client, auth_token, conversation_id, "Yes, please restore my account access."
+    )
+    assert second["status"] == "awaiting_approval"
+    assert second["requires_human"] is True
+    assert second["ticket_id"]
+
+    ticket_resp = await client.get(
+        f"/api/v1/support/tickets/{second['ticket_id']}", headers=_headers(staff_token)
+    )
+    assert ticket_resp.status_code == 200
+    ticket = ticket_resp.json()
+    assert ticket["pending_call"]["tool_name"] == "unlock_account"
+    assert ticket["pending_call"]["integration_name"] is None
+
+    # Must NOT be unlocked yet - only approval applies it.
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            select(Customer).where(Customer.id == seeded_customer["customer_id"])
+        )
+        assert result.scalar_one().is_locked is True
+
+    approve_resp = await client.post(
+        f"/api/v1/support/tickets/{second['ticket_id']}/approve",
+        json={"workflow_run_id": second["workflow_run_id"]},
+        headers=_headers(staff_token),
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+    approved_ticket = approve_resp.json()
+    assert approved_ticket["status"] == "resolved"
+    assert approved_ticket["execution_result"]["unlocked"] is True
+
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            select(Customer).where(Customer.id == seeded_customer["customer_id"])
+        )
+        assert result.scalar_one().is_locked is False
+
+
+@pytest.mark.asyncio
 async def test_scenario_refund_rejected_by_staff_updates_refund_status(
     client, auth_token, seeded_customer, staff_token
 ):

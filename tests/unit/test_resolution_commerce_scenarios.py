@@ -212,6 +212,92 @@ async def test_resolve_subscription_change_plan_survives_the_confirm_turn(
     assert any(call["args"].get("new_plan") == "Enterprise" for call in outcome.tool_calls)
 
 
+# --- Phase 13: subscription-cancellation policy check (Subscription Policy's
+# real "annual plan, cancel within 14 days -> prorated refund, not a plain
+# cancellation" rule) ---
+
+
+class _StubEligibilityLLM:
+    def __init__(self, qualifies: str) -> None:
+        self._qualifies = qualifies
+
+    async def generate(self, *a, **k):
+        raise NotImplementedError
+
+    async def generate_structured(self, messages, *, schema, max_tokens=1024, usage_callback=None):
+        from app.agents.policy_check import CommerceEligibilityCheck
+
+        return CommerceEligibilityCheck(qualifies=self._qualifies, reason="stub")
+
+
+class _StubSubscriptionPolicyRetriever:
+    async def retrieve(self, query: str, *, tenant_id: str, top_k: int = 4, **_):
+        from app.rag.retriever import RetrievedDocument
+
+        return [
+            RetrievedDocument(
+                document_id="doc_sub", chunk_id="c1", title="Subscription Policy",
+                source="subscription_policy.md", category="subscription",
+                text="Annual-plan customers cancelling within 14 days qualify for a prorated refund.",
+                score=0.9,
+            )
+        ]
+
+
+async def test_resolve_subscription_cancel_qualifying_for_refund_escalates_instead_of_cancelling(
+    db_session, seeded_customer, seeded_workflow_run
+):
+    from app.agents.resolution import resolve_subscription
+
+    customer_id = seeded_customer["customer_id"]
+    ctx = await _ctx(db_session, customer_id, seeded_workflow_run["workflow_run_id"])
+
+    outcome = await resolve_subscription(
+        ctx, customer_id, message="please cancel my subscription", confirmed=True, history=[],
+        llm=_StubEligibilityLLM("yes"), retriever=_StubSubscriptionPolicyRetriever(),
+    )
+
+    assert outcome.escalation_reason is not None
+    assert "prorated refund" in outcome.escalation_reason.lower()
+    # Must NOT have actually cancelled it.
+    assert not any(tc["tool"] == "update_subscription" for tc in outcome.tool_calls)
+
+
+async def test_resolve_subscription_cancel_not_qualifying_proceeds_normally(
+    db_session, seeded_customer, seeded_workflow_run
+):
+    from app.agents.resolution import resolve_subscription
+
+    customer_id = seeded_customer["customer_id"]
+    ctx = await _ctx(db_session, customer_id, seeded_workflow_run["workflow_run_id"])
+
+    outcome = await resolve_subscription(
+        ctx, customer_id, message="please cancel my subscription", confirmed=True, history=[],
+        llm=_StubEligibilityLLM("no"), retriever=_StubSubscriptionPolicyRetriever(),
+    )
+
+    assert any(tc["tool"] == "update_subscription" for tc in outcome.tool_calls)
+
+
+async def test_resolve_subscription_cancel_without_llm_or_retriever_skips_the_gate(
+    db_session, seeded_customer, seeded_workflow_run
+):
+    """No llm/retriever passed (the common case in most of this file's
+    other tests, and MOCK_LLM-driven test runs) - degrades to the
+    pre-Phase-13 unconditional-cancel behavior, exactly like resolve_refund's
+    equivalent gate already does."""
+    from app.agents.resolution import resolve_subscription
+
+    customer_id = seeded_customer["customer_id"]
+    ctx = await _ctx(db_session, customer_id, seeded_workflow_run["workflow_run_id"])
+
+    outcome = await resolve_subscription(
+        ctx, customer_id, message="please cancel my subscription", confirmed=True, history=[],
+    )
+
+    assert any(tc["tool"] == "update_subscription" for tc in outcome.tool_calls)
+
+
 # --- 8.3c: address changes (internal resolver always escalates) ---
 
 

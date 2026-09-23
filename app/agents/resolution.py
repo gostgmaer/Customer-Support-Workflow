@@ -20,11 +20,12 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from app.agents.confirmation import customer_already_confirmed
 from app.agents.external_tools import execute_proposal, propose_external_tool_call
-from app.agents.policy_check import check_commerce_policy
+from app.agents.policy_check import check_commerce_policy, check_policy_eligibility
 from app.config.policies import get_tool_policy
 from app.domain.exceptions import IntegrationError, ToolError
 from app.domain.models import Integration
@@ -323,8 +324,29 @@ async def resolve_payment_failure(ctx: ToolContext, customer_id: str, **_) -> Re
     return outcome
 
 
+def _days_since(iso_timestamp: str) -> str:
+    """Best-effort day count for a policy-check fact - never raises on a
+    malformed timestamp (degrades to 'unknown', matching this module's
+    established "missing fact -> insufficient_data" posture rather than
+    crashing the resolver)."""
+    try:
+        started = datetime.fromisoformat(iso_timestamp)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        return str((datetime.now(UTC) - started).days)
+    except ValueError:
+        return "unknown"
+
+
 async def resolve_subscription(
-    ctx: ToolContext, customer_id: str, *, message: str, confirmed: bool, **_
+    ctx: ToolContext,
+    customer_id: str,
+    *,
+    message: str,
+    confirmed: bool,
+    llm: LLMProvider | None = None,
+    retriever: Retriever | None = None,
+    **_,
 ) -> ResolutionOutcome:
     outcome = ResolutionOutcome()
     try:
@@ -342,6 +364,37 @@ async def resolve_subscription(
     if not wants_cancel:
         outcome.facts.append(f"Your subscription plan is '{sub.plan}', status '{sub.status}'.")
         return outcome
+
+    # spec: Phase 13 - the real seeded Subscription Policy states annual-
+    # plan customers cancelling within 14 days of purchase qualify for a
+    # prorated refund and should be "routed to the refund process instead
+    # of a plain cancellation" - previously nothing anywhere checked this;
+    # every cancellation was treated identically regardless of plan/timing
+    # (the exact same class of gap Phase 12 fixed for REFUND/RETURNS,
+    # generalized here per the user's explicit request). This app's
+    # Subscription model has no order_id - a subscription is never linked
+    # to a refundable Order row - so "route to the refund process" cannot
+    # be automated the way an order refund can; the honest, schema-correct
+    # outcome is to escalate for manual handling rather than proceed with
+    # a plain cancellation that policy says shouldn't happen automatically.
+    if llm is not None and retriever is not None:
+        policy_result = await check_policy_eligibility(
+            retriever,
+            llm,
+            tenant_id=ctx.tenant_id,
+            query="subscription cancellation and refund policy - prorated refund window for annual plans",
+            question=(
+                "Should this subscription cancellation be routed to the refund process instead of "
+                "a plain cancellation?"
+            ),
+            facts={"plan": sub.plan, "days since subscription started": _days_since(sub.started_at)},
+        )
+        if policy_result.decision == "allow":
+            outcome.escalation_reason = (
+                f"Cancellation may qualify for a prorated refund per our "
+                f"{policy_result.policy_title or 'subscription policy'} - requires manual handling"
+            )
+            return outcome
 
     if not confirmed:
         outcome.pending_confirmation = True
@@ -448,7 +501,14 @@ async def resolve_address_change(ctx: ToolContext, customer_id: str, **_) -> Res
     fields from the message (see resolve_via_storefront/propose_external_tool_call),
     so this always-escalate behavior only actually applies to a tenant
     with no storefront connected - also a defensible package-redirect-fraud
-    safeguard on its own terms, not purely a technical limitation."""
+    safeguard on its own terms, not purely a technical limitation.
+
+    spec: Phase 13 audit - deliberately NO app.agents.policy_check gate
+    here either, same reasoning as resolve_order_cancel: whether an
+    address can still be changed is already a deterministic fact
+    (order["status"] in NON_ADDRESS_CHANGEABLE_STATUSES), not a policy
+    judgment call, and there is no seeded policy document about address-
+    change cutoff timing to check against in the first place."""
     order, outcome = await _handle_order_lookup(ctx, customer_id)
     if not order:
         return outcome
@@ -465,6 +525,9 @@ async def resolve_address_change(ctx: ToolContext, customer_id: str, **_) -> Res
 async def resolve_payment_retry(
     ctx: ToolContext, customer_id: str, *, confirmed: bool, **_
 ) -> ResolutionOutcome:
+    """spec: Phase 13 audit - no policy-check gate: a payment retry is a
+    purely technical action (re-attempt a failed charge), not a policy
+    eligibility question, and no seeded policy document addresses it."""
     order, outcome = await _handle_order_lookup(ctx, customer_id)
     if not order:
         return outcome
@@ -532,7 +595,23 @@ async def resolve_account_access(
     identity-modifying, so it is proposed (awaiting_approval), never
     applied immediately - see pending_internal_call/
     app.workflow.nodes.human_approval._execute_approved_internal_call.
-    """
+
+    spec: Phase 13 audit - deliberately NO app.agents.policy_check gate on
+    the unlock proposal itself. The real seeded "Account Security Policy"
+    doc was read before deciding this: its actual content governs a
+    DIFFERENT scenario (suspected fraud/unauthorized access must never be
+    auto-resolved by the AI) - already handled deterministically and
+    earlier in the pipeline, since a message shaped like that classifies
+    as the SECURITY intent (app.llm.providers.mock's `_KEYWORD_INTENTS`,
+    and the real prompt's own taxonomy) and SECURITY is in
+    ALWAYS_ESCALATE_INTENTS, which short-circuits before resolve_issue
+    ever runs a resolver at all (app.workflow.routers.route_request).
+    A plain "I'm locked out" with no fraud language has no policy
+    eligibility question to gate - is_locked is already a deterministic
+    fact - so bolting an LLM policy check onto this specific doc would be
+    forcing a mismatched schema onto content that isn't actually an
+    eligibility rule, and could introduce a new failure mode (the LLM
+    over-applying "never auto-resolve" to an ordinary lockout)."""
     outcome = ResolutionOutcome()
     if _MERGE_ACCOUNTS_RE.search(message):
         outcome.escalation_reason = (
@@ -603,6 +682,7 @@ async def resolve_profile_update(
     customer_id: str,
     *,
     confirmed: bool,
+    conversation_id: str = "",
     profile_update_target: dict[str, str] | None = None,
     **_,
 ) -> ResolutionOutcome:
@@ -612,9 +692,38 @@ async def resolve_profile_update(
     its absence (e.g. a message like "I want to update my profile" with no
     concrete new value stated) is a real, honest degradation, not a crash.
     Always proposed (awaiting_approval), never applied immediately -
-    identity-modifying, ApprovalLevel.ALWAYS."""
+    identity-modifying, ApprovalLevel.ALWAYS.
+
+    **Live-testing found a real bug in the first version of this
+    resolver**: the customer's plain "yes, go ahead" confirmation reply
+    carries no email/name at all, so `profile_update_target` is empty on
+    that turn - and unlike `resolve_refund`'s dollar amount or
+    `resolve_subscription_change`'s plan name, an email is stripped by
+    `app.security.pii.redact` before it ever reaches `history`, so the
+    usual "scan the customer's prior turn in history" fallback those two
+    resolvers use literally cannot recover it. Fixed the same way
+    `resolve_via_storefront` already persists `last_order_id` across
+    turns: the extracted target is written to
+    `Conversation.metadata_json["pending_profile_update"]` on the
+    proposing turn and read back here if this turn's own extraction is
+    empty - never re-derived from redacted history.
+
+    spec: Phase 13 audit - no policy-check gate: no seeded policy document
+    addresses whether/when a customer may change their own name or email,
+    and staff approval (mandatory regardless) is the actual review step,
+    not an automated eligibility question."""
     outcome = ResolutionOutcome()
     target = profile_update_target or {}
+    conversation = (
+        await ConversationRepository(ctx.session, ctx.tenant_id).get(conversation_id)
+        if conversation_id
+        else None
+    )
+    if not target and conversation is not None:
+        stored = conversation.metadata_json.get("pending_profile_update")
+        if isinstance(stored, dict):
+            target = stored
+
     if not target:
         outcome.escalation_reason = (
             "Customer requested a profile update but did not state a new email or name"
@@ -622,10 +731,19 @@ async def resolve_profile_update(
         return outcome
 
     if not confirmed:
+        if conversation is not None:
+            conversation.metadata_json = {**conversation.metadata_json, "pending_profile_update": target}
+            await ctx.session.flush()
         outcome.pending_confirmation = True
         changes = ", ".join(f"{k.removeprefix('new_')}: {v}" for k, v in target.items())
         outcome.facts.append(f"Please confirm you would like to update your profile ({changes}).")
         return outcome
+
+    if conversation is not None and "pending_profile_update" in conversation.metadata_json:
+        conversation.metadata_json = {
+            k: v for k, v in conversation.metadata_json.items() if k != "pending_profile_update"
+        }
+        await ctx.session.flush()
 
     outcome.awaiting_approval = True
     outcome.pending_internal_call = {
@@ -649,6 +767,17 @@ _PAYMENT_METHOD_UPDATE_RE = re.compile(
 _GIFT_CARD_RE = re.compile(r"\bgift card\b|\bstore credit\b", re.I)
 
 
+async def _clear_pending_duplicate_charge(ctx: ToolContext, conversation_id: str) -> None:
+    if not conversation_id:
+        return
+    conversation = await ConversationRepository(ctx.session, ctx.tenant_id).get(conversation_id)
+    if conversation is not None and "pending_duplicate_charge" in conversation.metadata_json:
+        conversation.metadata_json = {
+            k: v for k, v in conversation.metadata_json.items() if k != "pending_duplicate_charge"
+        }
+        await ctx.session.flush()
+
+
 async def _resolve_duplicate_charge(
     ctx: ToolContext, customer_id: str, *, confirmed: bool, conversation_id: str, message_id: str
 ) -> ResolutionOutcome:
@@ -656,7 +785,23 @@ async def _resolve_duplicate_charge(
     gift cards/promo codes. Looks for >=2 'succeeded' payments on the
     customer's most recent order; if found, proposes refunding the extra
     charge(s) via the EXISTING create_refund_request tool (reused, not
-    reinvented) - same ALWAYS/ALWAYS approval tier as any other refund."""
+    reinvented) - same ALWAYS/ALWAYS approval tier as any other refund.
+
+    spec: Phase 13 audit - no policy-check gate: whether >=2 successful
+    payments exist on one order is already a deterministic fact from
+    Payment rows, not a policy judgment call - nothing for a policy
+    document to plausibly gate here.
+
+    **Live-testing found a real bug**: the natural confirmation reply
+    ("yes, please refund the duplicate charge") contains the word
+    "refund" - a strong enough signal that a real LLM reclassifies the
+    WHOLE TURN as the `REFUND` intent (a different top-level intent with
+    its own independent storefront-commerce routing), never reaching
+    this resolver again at all. Fixed via the same
+    `Conversation.metadata_json` mechanism as `resolve_profile_update`'s
+    equivalent fix: `gather_resolution_facts` checks for a
+    `pending_duplicate_charge` marker BEFORE trusting the freshly
+    reclassified intent to route anywhere else."""
     order, outcome = await _handle_order_lookup(ctx, customer_id)
     if not order:
         outcome.facts.append("I could not find a recent order to check for a duplicate charge.")
@@ -669,6 +814,7 @@ async def _resolve_duplicate_charge(
     outcome.tool_results.append({"tool": "list_payments_for_order", "result": payments_result.model_dump()})
     succeeded = [p for p in payments_result.payments if p.status == "succeeded"]
     if len(succeeded) < 2:
+        await _clear_pending_duplicate_charge(ctx, conversation_id)
         outcome.facts.append(
             f"I checked payments for order {order['order_id']} and found no duplicate charge - "
             f"{len(succeeded)} successful payment(s) on record."
@@ -677,6 +823,10 @@ async def _resolve_duplicate_charge(
 
     duplicate_amount = succeeded[-1].amount
     if not confirmed:
+        conversation = await ConversationRepository(ctx.session, ctx.tenant_id).get(conversation_id)
+        if conversation is not None:
+            conversation.metadata_json = {**conversation.metadata_json, "pending_duplicate_charge": True}
+            await ctx.session.flush()
         outcome.pending_confirmation = True
         outcome.facts.append(
             f"I found {len(succeeded)} successful payments of {duplicate_amount} {order['currency']} for "
@@ -685,6 +835,7 @@ async def _resolve_duplicate_charge(
         )
         return outcome
 
+    await _clear_pending_duplicate_charge(ctx, conversation_id)
     try:
         idempotency_key = build_idempotency_key(conversation_id, "duplicate_charge_refund", message_id)
         result = await refund_tools.create_refund_request(
@@ -1034,7 +1185,11 @@ async def resolve_via_storefront(
     # best-effort read lookup - see _lookup_order_snapshot_via_storefront's
     # docstring for why this app can't just read them off `proposal.arguments`
     # (a storefront's mutating operations typically take only an order id).
-    if intent in {"REFUND", "RETURNS"} and proposal.is_mutating and retriever is not None:
+    # spec: Phase 13 - EXCHANGE added alongside REFUND/RETURNS (no internal
+    # resolver exists for it - see COMMERCE_INTENTS's comment - so this
+    # storefront path is the ONLY place an exchange proposal is ever
+    # gated by policy at all).
+    if intent in {"REFUND", "RETURNS", "EXCHANGE"} and proposal.is_mutating and retriever is not None:
         order_id_for_policy = _extract_order_id_from_arguments(proposal.arguments)
         order_status: str | None = None
         order_date: str | None = None
@@ -1157,6 +1312,26 @@ async def gather_resolution_facts(
     retriever: Retriever | None = None,
     profile_update_target: dict[str, str] | None = None,
 ) -> ResolutionOutcome:
+    confirmed = customer_already_confirmed(history, message)
+
+    # spec: Phase 13 - live-testing found that a duplicate-charge dispute's
+    # natural confirmation reply ("yes, please refund the duplicate
+    # charge") reclassifies the WHOLE TURN as REFUND intent (a different,
+    # independent commerce-routing path) rather than continuing
+    # resolve_billing's flow - a real LLM re-derives intent per-message,
+    # not per-conversation, and "refund" is a strong enough signal to win.
+    # Conversation.metadata_json's `pending_duplicate_charge` marker (set
+    # by _resolve_duplicate_charge) is the durable source of truth for
+    # "what is this confirmation actually about," checked BEFORE the
+    # fresh (and here, misleading) intent classification is trusted to
+    # route anywhere else.
+    if confirmed and conversation_id:
+        conversation = await ConversationRepository(ctx.session, ctx.tenant_id).get(conversation_id)
+        if conversation is not None and conversation.metadata_json.get("pending_duplicate_charge"):
+            return await _resolve_duplicate_charge(
+                ctx, customer_id, confirmed=True, conversation_id=conversation_id, message_id=message_id
+            )
+
     if intent in COMMERCE_INTENTS and llm is not None:
         storefront = await _get_storefront_integration(ctx)
         if storefront is not None:
@@ -1164,7 +1339,6 @@ async def gather_resolution_facts(
                 ctx, llm, message, storefront, conversation_id, intent=intent, retriever=retriever
             )
 
-    confirmed = customer_already_confirmed(history, message)
     resolver = INTENT_RESOLVERS.get(intent)
     if resolver is not None:
         return await resolver(
@@ -1185,12 +1359,27 @@ async def gather_resolution_facts(
     return ResolutionOutcome()
 
 
+# spec: Phase 13 - rewritten for tone. The prior version's explicit
+# "structure it around: what I know, what I checked, what I changed..."
+# instruction reliably produced mechanical, labeled/bulleted output (an
+# LLM given named categories tends to reproduce them near-verbatim as
+# headers) - every safety-critical constraint below (grounded-only,
+# never claim an unconfirmed success) is preserved unchanged; only the
+# tone/structure guidance changed.
 RESPONSE_TEMPLATE_RULES = (
-    "Write a concise, professional, empathetic reply to the customer using ONLY "
-    "the facts listed below. Structure it around: what I know, what I checked, "
-    "what I changed (only if a tool result confirms a change happened), what I "
-    "cannot verify, and what happens next. Never state that an action succeeded "
-    "unless it is explicitly listed as having happened in the facts."
+    "Write a reply to the customer using ONLY the facts listed below - never invent or assume "
+    "anything beyond them. Write the way an experienced, attentive human support agent would: "
+    "warm, direct, and specific to this customer's actual situation, not a form letter. Vary "
+    "your phrasing naturally and avoid stock corporate filler ('we appreciate your patience', "
+    "'please note that', 'rest assured', or a reflexive apology with nothing to apologize for). "
+    "Do not use section headers, labels, or bullet points to announce categories like 'what I "
+    "know' or 'what happens next' - weave the same information into natural, flowing sentences "
+    "instead, the way a person would actually write it. Keep it concise - a few sentences is "
+    "usually enough, longer only if the facts genuinely require it - and lead with what the "
+    "customer actually asked before adding anything else. Never state that an action succeeded, "
+    "was completed, or changed anything unless a fact below explicitly confirms it happened - if "
+    "something is still pending approval or could not be verified, say so plainly rather than "
+    "implying it is done."
 )
 
 

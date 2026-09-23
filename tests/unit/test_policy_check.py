@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.agents.policy_check import CommerceEligibilityCheck, check_commerce_policy
+from app.agents.policy_check import CommerceEligibilityCheck, check_commerce_policy, check_policy_eligibility
 from app.llm.base import LLMMessage, UsageCallback
 from app.rag.retriever import RetrievedDocument
 
@@ -169,3 +169,83 @@ async def test_llm_failure_degrades_gracefully_instead_of_raising():
     )
     assert result.decision == "insufficient_data"
     assert result.policy_title == "Refund Policy"
+
+
+async def test_exchange_intent_reuses_the_return_policy_query():
+    """spec: Phase 13 - EXCHANGE was added to _POLICY_QUERIES, reusing the
+    same query as RETURNS (no dedicated seeded Exchange Policy doc)."""
+    retriever = _StubRetriever([_REFUND_POLICY_DOC])
+    llm = _StubLLM(qualifies="yes", reason="within the window")
+    result = await check_commerce_policy(
+        retriever, llm, tenant_id="default", intent="EXCHANGE",
+        order_status="delivered", order_reference_date="2020-01-01",
+    )
+    assert result.decision == "allow"
+    assert "exchange" in retriever.calls[0][0].lower()
+
+
+# --- check_policy_eligibility: the generic form (spec: Phase 13) ---
+
+_SUBSCRIPTION_POLICY_DOC = RetrievedDocument(
+    document_id="doc_2",
+    chunk_id="chunk_2",
+    title="Subscription Policy",
+    source="subscription_policy.md",
+    category="subscription",
+    text=(
+        "Customers on an annual plan who cancel within 14 days of the original purchase "
+        "are eligible for a prorated refund - route these to the refund process instead "
+        "of a plain cancellation."
+    ),
+    score=0.9,
+)
+
+
+async def test_check_policy_eligibility_denies_with_a_custom_question_and_facts():
+    retriever = _StubRetriever([_SUBSCRIPTION_POLICY_DOC])
+    llm = _StubLLM(qualifies="no", reason="Not an annual plan")
+    result = await check_policy_eligibility(
+        retriever, llm, tenant_id="default",
+        query="subscription cancellation refund window",
+        question="Should this cancellation route to a refund instead of a plain cancel?",
+        facts={"plan": "Pro Monthly", "days since purchase": "5"},
+    )
+    assert result.decision == "deny"
+    assert result.policy_title == "Subscription Policy"
+
+
+async def test_check_policy_eligibility_allows_with_a_custom_question_and_facts():
+    retriever = _StubRetriever([_SUBSCRIPTION_POLICY_DOC])
+    llm = _StubLLM(qualifies="yes", reason="Annual plan, within 14 days")
+    result = await check_policy_eligibility(
+        retriever, llm, tenant_id="default",
+        query="subscription cancellation refund window",
+        question="Should this cancellation route to a refund instead of a plain cancel?",
+        facts={"plan": "Pro Annual", "days since purchase": "3"},
+    )
+    assert result.decision == "allow"
+
+
+async def test_check_policy_eligibility_no_facts_skips_the_llm_call():
+    retriever = _StubRetriever([_SUBSCRIPTION_POLICY_DOC])
+    llm = _ExplodingLLM()
+    result = await check_policy_eligibility(
+        retriever, llm, tenant_id="default",
+        query="subscription cancellation refund window",
+        question="Should this cancellation route to a refund instead of a plain cancel?",
+        facts={"plan": None, "days since purchase": None},
+    )
+    assert result.decision == "insufficient_data"
+    assert result.policy_title == "Subscription Policy"
+
+
+async def test_check_policy_eligibility_no_document_found_degrades():
+    retriever = _StubRetriever([])
+    llm = _ExplodingLLM()
+    result = await check_policy_eligibility(
+        retriever, llm, tenant_id="default",
+        query="a query with no matching document",
+        question="does anything match?",
+        facts={"x": "y"},
+    )
+    assert result.decision == "insufficient_data"

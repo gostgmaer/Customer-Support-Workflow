@@ -31,3 +31,34 @@ def test_exchange_routes_to_knowledge_search():
     # No internal resolver exists for EXCHANGE (storefront-only) - the
     # route label reflects that it's not a mutating internal-tool path.
     assert route_request(_state("EXCHANGE")) == "knowledge_search"
+
+
+# --- Phase 13 ---
+
+
+def test_profile_update_routes_to_action_required():
+    assert route_request(_state("PROFILE_UPDATE")) == "action_required"
+
+
+def test_account_access_routes_to_action_required():
+    # Moved from customer_data (Phase 13) - its resolver can now propose a
+    # real mutation (account unlock).
+    assert route_request(_state("ACCOUNT_ACCESS")) == "action_required"
+
+
+def test_billing_routes_to_knowledge_search():
+    # A real, pre-existing routing gap found in Phase 13's audit: BILLING
+    # used to route to customer_data, which (like action_required) never
+    # runs knowledge_search_node - state["retrieved_documents"] was always
+    # empty for a BILLING message despite a real seeded Billing FAQ doc.
+    # resolve_billing's RAG-fallback branch needs real retrieval to ever
+    # ground an answer, so BILLING now gets the knowledge_search route.
+    assert route_request(_state("BILLING")) == "knowledge_search"
+
+
+def test_privacy_routes_to_human_escalation():
+    # Phase 13: PRIVACY moved into ALWAYS_ESCALATE_INTENTS - previously a
+    # PRIVACY message produced an empty ResolutionOutcome() with no facts
+    # and no escalation (it was in neither app.agents.resolution's
+    # KNOWLEDGE_INTENTS nor INTENT_RESOLVERS).
+    assert route_request(_state("PRIVACY")) == "human_escalation"

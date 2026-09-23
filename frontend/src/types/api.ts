@@ -98,9 +98,15 @@ export interface SupportTicket {
   approved_by: string | null;
   external_ref: string | null;
   external_url: string | null;
-  // Phase 8.2 - present only for an external-tool-call ticket (null for
-  // a refund ticket, which has no proposed call to show).
-  pending_call: { integration_name: string; tool_name: string; arguments: Record<string, unknown> } | null;
+  // Phase 8.2 - present for an external-tool-call ticket OR (Phase 13) an
+  // internal-action ticket (profile update / account unlock) - null for a
+  // refund ticket, which has no proposed call to show.
+  // integration_name is null for an internal-action ticket.
+  pending_call: {
+    integration_name: string | null;
+    tool_name: string;
+    arguments: Record<string, unknown>;
+  } | null;
   execution_result: Record<string, unknown> | null;
   created_at: string;
 }

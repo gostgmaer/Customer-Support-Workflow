@@ -171,11 +171,29 @@ async def run_workflow(
         # passed to interrupt() (see _extract_interrupt above), which
         # already carries integration_name/tool_name/arguments as top-level
         # keys for an external-tool proposal (type == "mcp_tool_approval")
-        # - never for a refund (type == "refund_approval").
+        # - never for a refund (type == "refund_approval"). spec: Phase 13 -
+        # also populated for an internal-action proposal
+        # (type == "internal_action_approval", e.g. a profile update or
+        # account unlock) so staff can see exactly what's proposed before
+        # approving - integration_name is omitted (there is no external
+        # integration involved). Note: unlike an external-tool ticket, an
+        # internal-action ticket's `approve.arguments` override is NOT
+        # currently applied - _execute_approved_internal_call always uses
+        # the originally-proposed arguments, a deliberate v1 boundary (see
+        # docs/API.md).
         pending_call = None
         if isinstance(interrupt_payload, dict) and interrupt_payload.get("type") == "mcp_tool_approval":
             pending_call = {
                 "integration_name": interrupt_payload.get("integration_name"),
+                "tool_name": interrupt_payload.get("tool_name"),
+                "arguments": interrupt_payload.get("arguments"),
+            }
+        elif (
+            isinstance(interrupt_payload, dict)
+            and interrupt_payload.get("type") == "internal_action_approval"
+        ):
+            pending_call = {
+                "integration_name": None,
                 "tool_name": interrupt_payload.get("tool_name"),
                 "arguments": interrupt_payload.get("arguments"),
             }

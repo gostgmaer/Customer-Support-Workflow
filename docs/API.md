@@ -232,13 +232,17 @@ populated (`workflow_events.data`) or written to for external tool calls
 (`tool_executions`) until this phase - see `docs/SECURITY.md`'s "Audit
 trail" section.
 
-**`TicketResponse.pending_call`** (spec: Phase 8.2) - `{"integration_name",
-"tool_name", "arguments"}` for an external-tool-call ticket (an MCP or
-OpenAPI proposal awaiting approval), `null` for a refund ticket (which
-has no external call to preview). This is the same data that used to
-only be visible flattened into free-text `summary`/`actions_taken` -
-structured here so a UI can render an editable form instead of parsing
-prose.
+**`TicketResponse.pending_call`** (spec: Phase 8.2, extended Phase 13) -
+`{"integration_name", "tool_name", "arguments"}` for an external-tool-call
+ticket (an MCP or OpenAPI proposal awaiting approval) OR an internal-
+action ticket (a `PROFILE_UPDATE`/`ACCOUNT_ACCESS`-driven proposal to
+call `update_customer_profile`/`unlock_account`, which - unlike
+`cancel_order` - never runs before staff approval); `integration_name`
+is `null` for the internal-action case (there is no external integration
+involved). `null` entirely for a refund ticket (which has no call to
+preview at all). This is the same data that used to only be visible
+flattened into free-text `summary`/`actions_taken` - structured here so a
+UI can render an editable form instead of parsing prose.
 
 **`approve`'s optional `arguments`** (spec: Phase 8.2) lets staff override
 some or all of `pending_call.arguments` before the call actually runs -
@@ -248,7 +252,15 @@ JSON Schema before dispatch (a bad override is rejected with the ticket
 reopened, exactly like a failed call - see below - never silently
 coerced or allowed to reach the external system unvalidated). Ignored
 entirely for a refund ticket (`pending_call` is `null`, so there is
-nothing to merge into).
+nothing to merge into), and **not currently applied to an internal-action
+ticket either** (spec: Phase 13) - `_execute_approved_internal_call`
+always uses the originally-proposed arguments; staff review/approve-or-
+reject, but cannot edit, a profile-update/account-unlock proposal before
+it runs. A documented v1 boundary, not an oversight - the two internal
+tools' argument shapes are simple enough (a customer id plus one or two
+plain fields) that edit-before-approve wasn't judged worth the
+re-validation plumbing external-tool overrides already needed for
+arbitrary third-party schemas.
 
 **`TicketResponse.execution_result`** (spec: Phase 8.2) - the real
 API/MCP response once an external-tool proposal is approved and

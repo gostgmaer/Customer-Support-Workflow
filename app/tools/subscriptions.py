@@ -16,6 +16,12 @@ class SubscriptionResult(BaseModel):
     plan: str
     status: str
     renews_at: str | None
+    # spec: Phase 13 - Subscription.created_at already existed (via
+    # TimestampMixin) but was never exposed through this tool; needed as
+    # a best-effort "purchase date" proxy for the Subscription Policy's
+    # 14-day annual-plan prorated-refund window check
+    # (app.agents.resolution.resolve_subscription).
+    started_at: str
 
 
 async def get_subscription(ctx: ToolContext, args: GetSubscriptionArgs) -> SubscriptionResult:
@@ -29,6 +35,7 @@ async def get_subscription(ctx: ToolContext, args: GetSubscriptionArgs) -> Subsc
             plan=sub.plan,
             status=sub.status,
             renews_at=sub.renews_at.isoformat() if sub.renews_at else None,
+            started_at=sub.created_at.isoformat(),
         )
 
     return await run_tool(

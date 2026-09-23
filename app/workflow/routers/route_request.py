@@ -21,13 +21,15 @@ Route = Literal["knowledge_search", "customer_data", "action_required", "human_e
 MUTATING_INTENTS = {
     "ORDER_CANCEL", "REFUND", "RETURNS", "SUBSCRIPTION_CHANGE", "ADDRESS_CHANGE", "PAYMENT_RETRY",
     # spec: Phase 13 - PROFILE_UPDATE is a new mutating intent (identity
-    # change, always human-approved); ACCOUNT_ACCESS and BILLING moved
-    # here from READ_ONLY_DATA_INTENTS below because their resolvers can
-    # now propose a real mutation (account unlock; a duplicate-charge
-    # refund) - this label only affects state["route"]'s observability
-    # value (see this module's docstring), not dispatch, but should stay
-    # accurate now that both can mutate.
-    "PROFILE_UPDATE", "ACCOUNT_ACCESS", "BILLING",
+    # change, always human-approved); ACCOUNT_ACCESS moved here from
+    # READ_ONLY_DATA_INTENTS below since its resolver can now propose a
+    # real mutation (account unlock). Neither resolver depends on
+    # state["retrieved_documents"] (see this module's docstring - only
+    # the "knowledge_search" route populates it), so routing them away
+    # from knowledge_search is safe. BILLING deliberately NOT moved here
+    # despite also gaining a mutation path (a duplicate-charge refund) -
+    # see KNOWLEDGE_INTENTS's comment below for why.
+    "PROFILE_UPDATE", "ACCOUNT_ACCESS",
 }
 READ_ONLY_DATA_INTENTS = {
     "ORDER_STATUS", "SHIPPING", "PAYMENT_FAILURE",
@@ -36,6 +38,21 @@ READ_ONLY_DATA_INTENTS = {
 KNOWLEDGE_INTENTS = {
     "PRODUCT_INFORMATION", "TECHNICAL_SUPPORT", "BUG_REPORT", "FEATURE_REQUEST",
     "COMPLAINT", "UNKNOWN", "EXCHANGE",
+    # spec: Phase 13 audit - a REAL pre-existing routing gap, found while
+    # verifying RAG coverage, not introduced by this phase: BILLING was
+    # previously in READ_ONLY_DATA_INTENTS ("customer_data" route), which
+    # - like "action_required" - never runs knowledge_search_node
+    # (app.workflow.nodes.route_nodes), so state["retrieved_documents"]
+    # was ALWAYS empty for a BILLING message despite a real seeded
+    # "Billing FAQ" doc existing. app.agents.resolution.resolve_billing's
+    # RAG-fallback branch (invoices, general billing questions, promo
+    # codes) needs real retrieval to ever ground an answer - moved here so
+    # BILLING gets the "knowledge_search" route. resolve_billing's
+    # duplicate-charge mutation path is unaffected either way, since
+    # gather_resolution_facts dispatches on intent uniformly regardless
+    # of route (this module's own docstring) - the route label never
+    # gated which resolver runs, only whether retrieval ran first.
+    "BILLING",
     # spec: Phase 13 - PRIVACY removed: it's now in ALWAYS_ESCALATE_INTENTS
     # (app.domain.enums.intent), checked before this set below, so its
     # membership here was already unreachable - removed for clarity, not

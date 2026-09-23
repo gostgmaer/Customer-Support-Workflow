@@ -624,7 +624,7 @@ rejects (`ValidationError`, 422) a create/update that would leave a
 second enabled `role: "storefront"` integration - staff must disable or
 retag the existing one first.
 
-## RAG policy-check gate for commerce actions (spec: Phase 12)
+## RAG policy-check gate for commerce actions (spec: Phase 12, generalized Phase 13)
 
 `RETURNS`/`REFUND`/`ORDER_CANCEL` previously proposed or created their
 action with no reference to the actual policy documents in the knowledge
@@ -680,6 +680,156 @@ open-ended reasoning, matching `app.agents.classifier`'s existing
 `CommerceEligibilityCheck` (mirrors `ExternalToolSelection`'s "mock defers
 real reasoning" precedent) - every `MOCK_LLM=true` flow is unaffected
 unless a test explicitly stubs this schema.
+
+**Generalized (spec: Phase 13)** - `check_commerce_policy` is now a thin
+wrapper over a new, reusable `app.agents.policy_check.check_policy_eligibility(
+retriever, llm, *, tenant_id, query, question, facts: dict[str, str | None])`,
+which any resolver with a real policy document that could plausibly gate
+its outcome can call directly - not just the original REFUND/RETURNS/
+ORDER_CANCEL commerce-action gate. Two new real call sites, both grounded
+in an actual seeded policy document's content (read before deciding to
+wire each one in, not assumed):
+
+- **EXCHANGE** (storefront-routed only - no internal resolver exists)
+  joined REFUND/RETURNS in `resolve_via_storefront`'s existing gate,
+  reusing the return-policy query (no dedicated seeded Exchange Policy
+  doc; exchange eligibility conventionally mirrors return windows).
+- **Subscription cancellation** (`resolve_subscription`) - the real
+  seeded Subscription Policy states annual-plan customers cancelling
+  within 14 days of purchase qualify for a prorated refund and should be
+  "routed to the refund process instead of a plain cancellation." Nothing
+  checked this before Phase 13; every cancellation was treated
+  identically regardless of plan/timing. `Subscription` has no `order_id`
+  - it is never linked to a refundable `Order` row - so "route to the
+  refund process" cannot be automated the way an order refund can; on a
+  qualifying `allow`, the resolver escalates for manual handling instead
+  of proceeding with a plain cancellation, the honest schema-correct
+  outcome rather than a fake automated refund. `SubscriptionResult`
+  gained a `started_at` field (from the already-existing
+  `Subscription.created_at`, just never exposed) as the "days since
+  purchase" fact.
+
+**Audited and deliberately NOT wired into a policy-check gate** (checked
+against real code/real seeded policy docs, not assumed - see each
+resolver's own docstring for the specific reasoning):
+- `resolve_order_cancel`/`resolve_address_change` - the outcome is
+  already a deterministic fact from order status
+  (`NON_CANCELLABLE_STATUSES`/`NON_ADDRESS_CHANGEABLE_STATUSES`), not a
+  policy judgment call.
+- `resolve_account_access`'s unlock proposal - the real seeded "Account
+  Security Policy" doc governs a *different* scenario (suspected
+  fraud/unauthorized access must never be auto-resolved by the AI),
+  already handled deterministically and earlier in the pipeline via the
+  `SECURITY` intent's `ALWAYS_ESCALATE_INTENTS` membership. A plain
+  lockout has no policy eligibility question to gate - `is_locked` is
+  already a deterministic fact.
+- `_resolve_duplicate_charge`, `resolve_payment_retry`,
+  `resolve_profile_update` - each is either a deterministic fact check
+  (payment count) or has no seeded policy document addressing it at all.
+
+## Full e-commerce scenario coverage (spec: Phase 13)
+
+Beyond order/fulfillment/payments (already thorough), account-related
+coverage was thin - `ACCOUNT_ACCESS`/`PASSWORD_RESET` both routed to one
+resolver that only ever sent a verification email, `Customer.is_locked`
+was never acted on by anything, and there was no profile/email update, no
+account-deletion/GDPR handling, no duplicate-charge dispute, and no
+lost-package discrepancy detection. New/changed intents (see
+`app.domain.enums.intent`'s six-location-checklist comment for the full
+consistency requirement this project has hit before - Phase 9.2's
+classifier-drift bug):
+
+- **`PROFILE_UPDATE`** (new intent) - name/email change via
+  `app.tools.customer.update_customer_profile` (rejects an email already
+  used by another customer in the tenant). The target new value(s) are
+  extracted from the customer's RAW message
+  (`app.agents.resolution.extract_profile_update_target`, a plain email/
+  name regex) *before* `app.security.pii.redact` strips them -
+  `resolve_issue` does this explicitly, since a new email is exactly the
+  kind of thing PII redaction removes before any resolver ever sees it
+  (the same class of problem `_substitute_known_placeholders` already
+  fixed once for external-tool arguments - see the "External tool-call
+  fallback" section above). Always proposed
+  (`awaiting_approval`/`pending_internal_call`), never applied
+  immediately.
+- **`ACCOUNT_ACCESS`** - split off from sharing `resolve_password_reset`
+  with `PASSWORD_RESET`. Now checks `Customer.is_locked`: not locked
+  defers to the same password-reset flow as before; locked proposes a
+  real `unlock_account` action (also always-approved, never applied
+  immediately). A merge-shaped request ("I have two accounts") is
+  recognized via a deterministic regex and escalated - no safe automated
+  way exists to verify identity across two separate records.
+- **`PRIVACY`** - moved into `ALWAYS_ESCALATE_INTENTS`. A real,
+  previously-unnoticed bug: `PRIVACY` was in neither
+  `app.agents.resolution`'s `KNOWLEDGE_INTENTS` nor `INTENT_RESOLVERS`,
+  so `gather_resolution_facts` fell through to its final
+  `return ResolutionOutcome()` - every `PRIVACY` message (including a
+  GDPR "delete my data" request) silently produced zero facts and no
+  escalation. Fixed by adding `PRIVACY` alongside `SECURITY`/`FRAUD`/
+  `LEGAL`, which also correctly makes every privacy/data request
+  (informational or a deletion request) reach a human, matching this
+  app's existing treatment of every other legally-sensitive intent.
+- **`BILLING`** gained a real `INTENT_RESOLVERS` entry
+  (`resolve_billing`) instead of always falling through to RAG: a
+  duplicate/incorrect-charge dispute (real backing data - `Payment` rows;
+  proposes a refund of the extra charge via the *existing*
+  `create_refund_request` tool, reused not reinvented), a payment-method
+  update request (redirected to the secure self-service page - this app
+  never accepts card details through chat, full stop), and a gift-card/
+  store-credit request (escalated - no backing gift-card system exists
+  anywhere in this app or its connected storefront). Everything else
+  (invoices, general billing questions, promo codes) falls through to
+  the same RAG-grounded `resolve_from_knowledge` behavior BILLING already
+  had. **A real, pre-existing routing gap was found and fixed alongside
+  this**: `BILLING` was in `route_request`'s `READ_ONLY_DATA_INTENTS`
+  (`customer_data` route), which - like `action_required` - never runs
+  `knowledge_search_node`, so `state["retrieved_documents"]` was *always*
+  empty for a `BILLING` message despite a real seeded "Billing FAQ" doc
+  existing; moved to the `knowledge_search` route so `resolve_billing`'s
+  RAG fallback actually has something to ground an answer in.
+- **`PRODUCT_INFORMATION`** gained a real `INTENT_RESOLVERS` entry
+  (`resolve_product_information`): a bulk/wholesale inquiry is
+  recognized and escalated with a clear "route to sales" reason (no real
+  backing sales system exists) rather than answered from a generic
+  product FAQ. Everything else still falls through to RAG, unchanged.
+  Real-time stock/availability was investigated and found **not** to be
+  exposed by either connected storefront's operation catalog (confirmed
+  via each one's actual cached `spec_cache`, not assumed) - deliberately
+  left RAG-only, a documented gap rather than a fabricated integration.
+- **Lost/never-arrived package** - `resolve_order_status` (shared by
+  `ORDER_STATUS`/`SHIPPING`) now detects a real discrepancy: order status
+  says `delivered` but the customer's message disputes ever receiving it
+  ("shows delivered but I never got it"). Escalates with the discrepancy
+  stated plainly - a real lost-package/potential-fraud case, not a
+  routine status lookup - rather than just reporting "delivered" as if
+  that settles the question.
+
+**Identity-modifying actions never execute during `resolve_issue`.**
+`update_customer_profile`/`unlock_account` are `ApprovalLevel.ALWAYS` in
+both directions (customer confirmation AND staff approval), and - unlike
+`cancel_order` (`ApprovalLevel.SOMETIMES`, which runs immediately and is
+only *sometimes* flagged for post-hoc review) - staff approval here must
+happen *before* the action takes effect, not after. This needed a new
+mechanism: `SupportState.pending_internal_call` (`{"tool": str, "args":
+dict}`), set by the resolver instead of calling the tool, propagated
+through `resolve_issue` exactly like `pending_mcp_call` already is, and
+executed exactly once by a new
+`app.workflow.nodes.human_approval._execute_approved_internal_call` -
+the internal-tool analogue of `_execute_approved_external_call`,
+dispatched via a small `tool name -> (function, args model)` table.
+Rejection or an execution failure escalates with a clear reason, exactly
+matching the external-tool-call failure path's shape.
+
+**Response tone.** `app.agents.resolution.draft_response`'s prompt
+(`RESPONSE_TEMPLATE_RULES`) was rewritten: the prior version's explicit
+"structure it around: what I know, what I checked, what I changed..."
+instruction reliably produced mechanical, labeled/bulleted output (an LLM
+given named categories tends to reproduce them near-verbatim as
+headers). Every safety-critical constraint (grounded-only, never claim an
+unconfirmed success) is unchanged - only the tone/structure guidance
+changed, toward natural prose, no visible section headers, and explicit
+anti-corporate-boilerplate wording ("we appreciate your patience", "rest
+assured", etc.).
 
 ## Expanded commerce scenarios (spec: Phase 8.3)
 

@@ -256,6 +256,21 @@ instance count`. See `tests/integration/test_rate_limit_api.py`.
   today; `Customer` has no phone/address), so an unrecognized placeholder
   is left exactly as proposed and fails the same honest way it did
   before this fix, rather than being guessed at.
+- **A second, related tension (spec: Phase 13), a different shape from
+  the one above**: a `PROFILE_UPDATE` request (changing an email/name)
+  needs the *new* value the customer just typed - there is no "known
+  value on file" to substitute back, since the whole point is a
+  *different* email than what's on record, so
+  `_substitute_known_placeholders`'s approach doesn't apply here.
+  `app.agents.resolution.extract_profile_update_target` runs on the RAW
+  message in `app.workflow.nodes.resolve_issue`, *before*
+  `app.security.pii.redact` strips it, extracting only a plain email/name
+  match - never the raw message itself - and passing that extracted
+  value forward as `profile_update_target`. This is the one deliberate
+  exception to "redact before anything downstream sees it": the raw
+  message is read exactly once, at this one point, for this one narrow
+  extraction, and nothing else (not the LLM prompt, not any log, not any
+  other resolver) ever sees it unredacted.
 
 ## Audit trail (spec §44 rule 15)
 
@@ -622,6 +637,11 @@ step for your own runbook, not a solved problem.
 - The PII redaction patterns are regex-based and will miss PII that
   doesn't match a known shape; do not treat it as a compliance guarantee
   without review for your specific data.
+- An internal-action ticket (profile update / account unlock, spec:
+  Phase 13) cannot have its proposed arguments edited before approval the
+  way an external-tool ticket can - staff can approve or reject the
+  AI-proposed values, not change them. See `docs/API.md`'s `pending_call`
+  section.
 - A workflow run resolves `confidence_intent`/`confidence_retrieval`/
   `escalation_max_failed_attempts` **once**, at run start, into
   `state["runtime_config"]` - an admin changing one of these mid-run
